@@ -13,10 +13,10 @@ index aabf5bf..963d33f 100644
  	a, lk, err := newApp(ctx, flags, true, true)
 diff --git a/cmd/wacli/content_policy.go b/cmd/wacli/content_policy.go
 new file mode 100644
-index 0000000..1c41beb
+index 0000000..a7d2dd4
 --- /dev/null
 +++ b/cmd/wacli/content_policy.go
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,56 @@
 +package main
 +
 +import (
@@ -33,11 +33,15 @@ index 0000000..1c41beb
 +// as the archive without requiring it to read or write WhatsApp session state.
 +func newContentPolicyCmd(flags *rootFlags) *cobra.Command {
 +	root := &cobra.Command{Use: "policy", Short: "Companion content policy integration"}
-+	var chat string
++	var chats []string
 +	resolve := &cobra.Command{Use: "resolve", Short: "Resolve a stable chat identity and verified local aliases", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
-+		jid, err := types.ParseJID(chat)
-+		if err != nil || jid.IsEmpty() || !strings.Contains(chat, "@") || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer && jid.Server != types.GroupServer) {
-+			return fmt.Errorf("a stable chat JID is required")
++		jids := make([]types.JID, 0, len(chats))
++		for _, chat := range chats {
++			jid, err := types.ParseJID(chat)
++			if err != nil || jid.IsEmpty() || !strings.Contains(chat, "@") || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer && jid.Server != types.GroupServer) {
++				return fmt.Errorf("a stable chat JID is required")
++			}
++			jids = append(jids, jid.ToNonAD())
 +		}
 +		ro := *flags
 +		ro.readOnly = true
@@ -48,23 +52,33 @@ index 0000000..1c41beb
 +			return err
 +		}
 +		defer closeApp(a, lk)
-+		ids, err := messageChatJIDFilter(ctx, a, jid.ToNonAD().String())
-+		if err != nil {
-+			return err
++		ids := make([]string, 0, len(jids))
++		seen := make(map[string]bool, len(jids))
++		for _, jid := range jids {
++			aliases, err := messageChatJIDFilter(ctx, a, jid.String())
++			if err != nil {
++				return err
++			}
++			for _, alias := range aliases {
++				if !seen[alias] {
++					ids = append(ids, alias)
++					seen[alias] = true
++				}
++			}
 +		}
 +		return out.WriteJSON(os.Stdout, map[string]any{"chat_ids": ids})
 +	}}
-+	resolve.Flags().StringVar(&chat, "chat", "", "stable chat JID")
++	resolve.Flags().StringArrayVar(&chats, "chat", nil, "stable chat JID (repeat for a verified identity union)")
 +	_ = resolve.MarkFlagRequired("chat")
 +	root.AddCommand(resolve)
 +	return root
 +}
 diff --git a/cmd/wacli/content_policy_test.go b/cmd/wacli/content_policy_test.go
 new file mode 100644
-index 0000000..c0fa644
+index 0000000..62a6842
 --- /dev/null
 +++ b/cmd/wacli/content_policy_test.go
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,178 @@
 +package main
 +
 +import (
@@ -170,6 +184,28 @@ index 0000000..c0fa644
 +			}
 +		})
 +	}
++	t.Run("batch unions verified aliases once", func(t *testing.T) {
++		args := []string{"--store", dir, "--content-policy", policy, "--read-only", "--json", "policy", "resolve"}
++		for _, chat := range []string{"15551234567:2@s.whatsapp.net", "999123456789@lid", "777@lid", "123-456@g.us", "777@lid"} {
++			args = append(args, "--chat", chat)
++		}
++		stdout, stderr, err := runPresenceDelegateHelper(t, args)
++		if err != nil {
++			t.Fatalf("resolve batch failed %v out=%s err=%s", err, stdout, stderr)
++		}
++		var envelope struct {
++			Data struct {
++				ChatIDs []string `json:"chat_ids"`
++			} `json:"data"`
++		}
++		if err := json.NewDecoder(strings.NewReader(stdout)).Decode(&envelope); err != nil {
++			t.Fatal(err)
++		}
++		want := []string{"15551234567@s.whatsapp.net", "999123456789@lid", "777@lid", "123-456@g.us"}
++		if !reflect.DeepEqual(envelope.Data.ChatIDs, want) {
++			t.Fatalf("batch aliases=%v want %v", envelope.Data.ChatIDs, want)
++		}
++	})
 +	assertNoSQLiteSidecars(t, filepath.Join(dir, "session.db"))
 +}
 +
