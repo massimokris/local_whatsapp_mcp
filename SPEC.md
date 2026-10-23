@@ -1,6 +1,6 @@
 # LocalWhatsAppMCP — v1 specification
 
-Status: accepted product direction; implementation has not started in this folder. Recorded 2026-10-23 from the originating conversation. The [Wayfinder map](docs/wayfinder/map.md) records decisions and technical evidence; this document defines the product acceptance contract.
+Status: accepted product contract; v1 implementation and local installation build recorded 2026-10-23. See [installation and acceptance](docs/acceptance.md) for verification evidence and remaining live-account checks. The [Wayfinder map](docs/wayfinder/map.md) records decisions and technical evidence; this document defines the product acceptance contract.
 
 ## Product
 
@@ -182,9 +182,9 @@ Sync, sending, file serving, and tunnel recovery are implementation responsibili
 | Setup | Generated instructions and a bundled helper that exchanges pairing tokens, persists configuration, and installs the client connection. |
 | Distribution | Swift Package Manager and Go build tools; native `.app` and `.dmg` packaging. |
 
-Build versions, minimum macOS version, architecture support, and signing/notarization are to be established from the pinned dependencies and actual packaging checks. Dock's own deployment target and release commands are not evidence that this new app builds or supports the same systems.
+Build versions, minimum macOS version, architecture support, and signing/notarization are recorded from pinned dependencies and actual packaging checks in [building.md](docs/building.md). Dock's own deployment target and release commands are not evidence that this new app builds or supports the same systems.
 
-The local Go experiment in the sibling `whatsapp-mcp/` folder is not this app's implementation or a replacement for the accepted wacli boundary. This folder currently contains planning documents only.
+The local Go experiment in the sibling `whatsapp-mcp/` folder is not this app's implementation or a replacement for the accepted wacli boundary. This folder now contains the native app, Go service, pinned engine patch, build tooling, and planning history.
 
 ## UI reference and surfaces
 
@@ -196,7 +196,7 @@ Keyboard access, meaningful control labels, readable errors, and selection state
 
 ## Acceptance scenarios
 
-These are future implementation checks, not tests already executed.
+These scenarios define the acceptance contract. [Installation and acceptance](docs/acceptance.md) distinguishes executed deterministic checks from unexecuted live-account checks.
 
 | Scenario | Expected outcome |
 | --- | --- |

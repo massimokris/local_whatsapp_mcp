@@ -1,15 +1,15 @@
 # Preserve one-time pairing across MCP client connections
 
 - ID: `LW-003`
-- Status: open
+- Status: closed
 - Labels: `wayfinder:research`
 - Mode: AFK
 - Parent: [LocalWhatsAppMCP v1 decision map](../map.md)
-- Assignee: unassigned
+- Assignee: massi
 - Blocked by: [Define the v1 product contract](001-product-contract.md)
 - Research branch: `research/local-whatsapp-mcp-pairing`
 - Research asset: [Agent-pairing integration](../../research/agent-pairing.md)
-- Latest comment: [Research findings and remaining verification](../comments/003-agent-pairing.md)
+- Latest comment: [Implementation resolution and remaining live checks](../comments/003-agent-pairing.md#implementation-resolution--2026-10-23)
 
 ## Question
 
