@@ -27,6 +27,8 @@ func main() {
 	if err := run(os.Args[1:]); err != nil {
 		if len(os.Args) > 1 && os.Args[1] == "control" {
 			json.NewEncoder(os.Stdout).Encode(map[string]string{"error": err.Error()})
+		} else if len(os.Args) > 1 && os.Args[1] == "serve" {
+			_ = json.NewEncoder(os.Stderr).Encode(map[string]string{"startup_error": startupErrorCode(err)})
 		} else {
 			fmt.Fprintln(os.Stderr, err.Error())
 		}
@@ -49,6 +51,7 @@ func run(args []string) error {
 		binary := fs.String("wacli", "", "bundled WhatsApp engine")
 		helper := fs.String("helper", "", "bundled setup helper")
 		listen := fs.String("listen", "127.0.0.1:32191", "loopback MCP address")
+		ownerStdin := fs.Bool("owner-stdin", false, "stop when the owning app closes stdin")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -58,7 +61,12 @@ func run(args []string) error {
 		if *helper == "" {
 			*helper, _ = os.Executable()
 		}
-		return serve(*dir, *binary, *helper, *listen)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if *ownerStdin {
+			go func() { _, _ = io.Copy(io.Discard, os.Stdin); cancel() }()
+		}
+		return serve(ctx, service.Options{DataDir: *dir, HelperPath: *helper, ExtensionFactory: extensionFactory}, *binary, *listen)
 	case "control":
 		method := fs.String("method", "GET", "")
 		path := fs.String("path", "/state", "")
@@ -144,7 +152,8 @@ func run(args []string) error {
 		return errors.New("unknown helper command")
 	}
 }
-func serve(dir, binary, helper, address string) error {
+func serve(parent context.Context, options service.Options, binary, address string) error {
+	dir := options.DataDir
 	host, _, err := net.SplitHostPort(address)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return errors.New("MCP listener must use an explicit loopback IP address")
@@ -174,7 +183,8 @@ func serve(dir, binary, helper, address string) error {
 	if err != nil {
 		return err
 	}
-	s, err := service.New(service.Options{DataDir: dir, HelperPath: helper, Engine: engine.New(binary, dir), LocalURL: baseURL, ExtensionFactory: extensionFactory})
+	options.Engine, options.LocalURL = engine.New(binary, dir), baseURL
+	s, err := service.New(options)
 	release()
 	if err != nil {
 		return err
@@ -195,7 +205,7 @@ func serve(dir, binary, helper, address string) error {
 	}
 	public := &http.Server{Handler: s.PublicHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	private := &http.Server{Handler: s.ControlHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	failures := make(chan error, 2)
 	go func() { failures <- public.Serve(tcp) }()
@@ -238,4 +248,30 @@ func waitForWriter(dir string) (func(), error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// Startup output is an allowlisted protocol, never arbitrary error/log content.
+func startupErrorCode(err error) string {
+	detail := err.Error()
+	switch {
+	case strings.Contains(detail, "saved configuration is missing"):
+		return "configuration_missing"
+	case strings.Contains(detail, "saved configuration is invalid"), strings.Contains(detail, "saved chat scope is invalid"):
+		return "configuration_invalid"
+	case strings.Contains(detail, "Keychain"):
+		return "keychain_unavailable"
+	case strings.Contains(detail, "port is in use"):
+		return "port_in_use"
+	case strings.Contains(detail, "service is already running"):
+		return "already_running"
+	case strings.Contains(detail, "previous WhatsApp writer"):
+		return "writer_stopping"
+	case strings.Contains(detail, "control socket"):
+		return "control_unavailable"
+	}
+	var pathError *os.PathError
+	if errors.As(err, &pathError) {
+		return "storage_unavailable"
+	}
+	return "startup_failed"
 }

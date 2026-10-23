@@ -4,7 +4,7 @@
 
 LocalWhatsAppMCP is a native macOS menu bar app that connects the user's WhatsApp to multiple local or cloud agents through MCP. The app owns sync, storage, chat scope, and access; the chosen agents own reasoning, schedules, and notifications.
 
-This folder currently contains the specification and local Wayfinder tracker. The accepted stack is SwiftUI/AppKit, a Go MCP service, pinned wacli, SQLite/FTS5, and optional ngrok/cloudflared. Treat these as intended architecture, not implemented modules.
+The implementation uses SwiftUI/AppKit in `native/`, the Go MCP service and setup helper in `backend/`, and a pinned wacli patch in `vendor/wacli/`. SQLite/FTS5 stores the archive; optional ngrok/cloudflared provides cloud access. The specification and local trackers retain the accepted contract and decision history.
 
 ## Read before changing
 
@@ -15,6 +15,8 @@ This folder currently contains the specification and local Wayfinder tracker. Th
 | UI, interaction, copy, or accessibility | [UI reference](docs/ui-reference.md) for the Dock source references and adaptation rules. |
 | WhatsApp ingestion or archive access | [Selective-storage research](docs/research/selective-storage.md) for upstream insertion points and required policy coverage. |
 | MCP authentication or agent installation | [Agent-pairing research](docs/research/agent-pairing.md) for client capabilities and the fixed setup experience. |
+| Process ownership, native/service integration, or engine JSON | [Component interfaces](docs/implementation/interfaces.md) and [engine integration](vendor/wacli/README.md). |
+| Building, packaging, signing, or acceptance claims | [Build guide](docs/building.md) and [acceptance evidence](docs/acceptance.md). |
 | Planning, claiming, or resolving decisions | [Decision map](docs/wayfinder/map.md) and [tracker operations](docs/agents/issue-tracker.md). |
 
 ## Working agreements
@@ -34,9 +36,16 @@ Use deterministic fixtures for scope transitions, identity aliases, credential r
 
 ## Build and verification
 
-There is no application source, package manifest, or build/test command in this folder yet. Do not report the app as runnable. Add verified commands here and in the README when implementation introduces their actual manifests/scripts.
+Run from the project root on macOS:
 
-For documentation changes, check relative links, tracker metadata/dependencies, and agreement with the specification. Runtime acceptance scenarios remain unexecuted until implementation. Documentation checks do not establish WhatsApp or client compatibility.
+- `./scripts/test.sh`: native tests, backend race tests/vet, engine suites with and without FTS5, and packaging checks.
+- `./scripts/build.sh`: build and verify the native app with bundled Go service and pinned engine.
+- `./scripts/package.sh`: build, verify, and package the app as DMG/ZIP with checksums.
+- `python3 ./scripts/smoke-bundle.py dist/LocalWhatsAppMCP.app`: exercise the actual bundle using synthetic data and temporary Keychain entries, with no WhatsApp login.
+
+Use [the build guide](docs/building.md) for toolchain, architecture, signing, and targeted commands. Ad-hoc package verification does not establish Developer ID notarization or runtime compatibility on an untested Mac.
+
+For documentation changes, check relative links, tracker metadata/dependencies, and agreement with the specification. Keep synthetic regression evidence distinct from live WhatsApp, client reload, provider login, and sleep/wake checks. Documentation checks do not establish WhatsApp or client compatibility.
 
 ## Git and maintenance
 

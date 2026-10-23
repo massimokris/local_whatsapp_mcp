@@ -12,7 +12,7 @@ These are internal engineering contracts for concurrent implementation. Product 
 
 ## Helper/private control boundary
 
-Native app launches `localwhatsappmcp serve --data-dir DIR --wacli PATH --helper PATH`. Process stdin/stdout never carries message content in diagnostic mode. SIGTERM waits for owned child shutdown. Helper calls use `localwhatsappmcp control --data-dir DIR --method METHOD --path PATH`; JSON request body comes from stdin; one JSON response goes to stdout; nonzero status indicates failure. Blocking process work stays off the main actor.
+Native app launches `localwhatsappmcp serve --owner-stdin --data-dir DIR --wacli PATH --helper PATH`. The app keeps stdin open as an ownership pipe; EOF cancels the service and awaits owned children, including after an app crash. SIGTERM also waits for owned child shutdown. Service stderr emits only a bounded, allowlisted `startup_error` code for startup failure; native UI maps it to recovery copy. It never displays arbitrary process logs. Helper calls use `localwhatsappmcp control --data-dir DIR --method METHOD --path PATH`; JSON request body comes from stdin; one JSON response goes to stdout; nonzero status indicates failure. Blocking process work stays off the main actor.
 
 Private endpoints:
 
@@ -29,9 +29,9 @@ Private endpoints:
 | `POST /cloud/instructions` | `{"provider":"ngrok" or "cloudflared","name":"Cloud agent"}` | `{"instructions":"..."}` |
 | `DELETE /cloud` | none | state |
 
-State is JSON with `whatsapp` (`status`, `detail`, optional `qr`, `last_event_at`), `scope` (`mode`: `initial`, `all`, `selected`; `chat_ids`; `revision`), `agents` (array of `id`, `name`, `client`, `send_enabled`, `connected`, optional `last_seen_at`), `mcp` (`url`, `status`), `cloud` (`enabled`, `provider`, `hostname`, `status`, `detail`), and optional `error`. Chat rows contain `id`, `name`, `phone`, `kind` (`direct`/`group`), `last_activity` RFC3339. Errors use `{"error":"readable safe message"}`. Native decoder should tolerate missing optional fields.
+State is JSON with `whatsapp` (`status`, `detail`, optional `qr`, `last_event_at`), `scope` (`mode`: `initial`, `all`, `selected`; `chat_ids`; `revision`), `agents` (array of `id`, `name`, `client`, `send_enabled`, `connected`, optional `last_seen_at`), `mcp` (`url`, `status`), `cloud` (`enabled`, `provider`, `hostname`, `status`, `detail`), and optional `error`. Chat rows contain `id`, verified `aliases` (optional array including the current and previous identities), `name`, `phone`, `kind` (`direct`/`group`), `last_activity` RFC3339. Errors use `{"error":"readable safe message"}`. Native decoder should tolerate missing optional fields.
 
-Native UI keeps selection/search locally, filters complete minimal catalog, and sends the selected stable IDs. Private endpoints do not require bearer credentials because the user-owned socket is the access boundary; none is mounted on the HTTP MCP listener.
+Native UI keeps selection/search locally, filters the complete minimal catalog, and sends the selected stable IDs. It canonicalizes each verified alias group to a current catalog row, preferring a phone-number JID when present; removing that row removes all its aliases. Display names and formatted phone strings never prove identity. Private endpoints do not require bearer credentials because the user-owned socket is the access boundary; none is mounted on the HTTP MCP listener.
 
 ## Engine policy boundary
 
@@ -39,4 +39,4 @@ Patched wacli accepts global `--content-policy PATH`. A required, versioned poli
 
 ## Cloud extension
 
-Cloud code lives in `backend/internal/cloud` and integrates after the service seam exists. It must expose only MCP, authenticated attachments, and required OAuth endpoints. Setup/provider credentials and grant changes use private control. Local bearer grants and OAuth grants both revalidate current scope and sending permission.
+Cloud code lives in `backend/internal/cloud` and integrates after the service seam exists. It must expose only MCP, authenticated attachments, and required OAuth endpoints. Setup/provider credentials and grant changes use private control. Tunnel providers run in a separate helper worker: the service sends a bounded command on a private stdin pipe and keeps it open. The worker terminates the provider process group on EOF or signal, so abrupt service death also removes its public tunnel. Credentials travel only through that private pipe and provider environment, never arguments, logs, or files. Local bearer grants and OAuth grants both revalidate current scope and sending permission.

@@ -76,7 +76,7 @@ wacli --store DIR --content-policy PATH --read-only --json policy resolve --chat
 
 Repeat `--chat JID` to resolve all selected chats in one process. It returns the
 ordinary upstream JSON envelope with a deduplicated `data.chat_ids` union in
-first-seen order. Only exact
+first-seen order and `data.groups`, a mapping from each normalized input JID to its verified alias array. The private catalog uses these groups to keep chat selection correct after LID-to-phone migration. Only exact
 stable JIDs are accepted; names are never authorization identities. LID/phone
 pairs come from upstream's verified local mapping. Group membership does not
 authorize a participant's direct chat.

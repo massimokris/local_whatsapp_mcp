@@ -6,8 +6,10 @@ import (
 	"errors"
 	"github.com/massi/localwhatsappmcp/internal/engine"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -132,13 +134,18 @@ func (s *Service) ControlHandler() http.Handler {
 				http.NotFound(w, r)
 				return
 			}
+			candidate := s.cfg
+			candidate.Grants = maps.Clone(s.cfg.Grants)
 			if r.Method == "DELETE" {
-				delete(s.cfg.Grants, id)
+				delete(candidate.Grants, id)
 			} else {
 				g.SendEnabled = enabled.SendEnabled
-				s.cfg.Grants[id] = g
+				candidate.Grants[id] = g
 			}
-			err := s.saveLocked()
+			err := AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), candidate)
+			if err == nil {
+				s.cfg = candidate
+			}
 			s.mu.Unlock()
 			s.operations.Unlock()
 			if err != nil {

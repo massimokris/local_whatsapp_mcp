@@ -162,7 +162,7 @@ func (e *Extension) start() error {
 	e.configError = ""
 	e.mu.Unlock()
 	e.host.SetPublicURL("https://" + c.Hostname)
-	e.supervisor.Start(spec, c.Hostname)
+	e.supervisor.Start(spec, c.Hostname, e.host.HelperPath())
 	return nil
 }
 func (e *Extension) control(w http.ResponseWriter, r *http.Request) {

@@ -27,3 +27,24 @@ final class ChatSelectionTests: XCTestCase {
         XCTAssertEqual(selection.selectedIDs.count, 101)
     }
 }
+
+extension ChatSelectionTests {
+    func testVerifiedMigrationCanonicalizesDraftAndDeselectsEveryAlias() throws {
+        let old = "999@lid", current = "15551234567@s.whatsapp.net"
+        let data = Data("""
+        [{"id":"\(current)","name":"Work","aliases":["\(current)","\(old)"]},{"id":"777@lid","name":"Work"}]
+        """.utf8)
+        let migrated = try JSONDecoder().decode([Chat].self, from: data)
+        var selection = ChatSelection(chats: [Chat(id: old, name: "Work")], selectedIDs: [old, "777@lid"])
+        selection.chats = migrated
+        XCTAssertEqual(selection.selectedIDs, [current, "777@lid"])
+        selection.toggle(current)
+        XCTAssertEqual(selection.selectedIDs, ["777@lid"], "A matching display name is not an identity proof")
+        selection.selectedIDs = [old]
+        selection.query = "15551234567"
+        selection.clearResults()
+        XCTAssertTrue(selection.selectedIDs.isEmpty, "Clearing the current row must remove the invisible previous identity")
+        selection.selectAllResults()
+        XCTAssertEqual(selection.selectedIDs, [current])
+    }
+}

@@ -13,10 +13,10 @@ index aabf5bf..963d33f 100644
  	a, lk, err := newApp(ctx, flags, true, true)
 diff --git a/cmd/wacli/content_policy.go b/cmd/wacli/content_policy.go
 new file mode 100644
-index 0000000..a7d2dd4
+index 0000000..866977b
 --- /dev/null
 +++ b/cmd/wacli/content_policy.go
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,58 @@
 +package main
 +
 +import (
@@ -53,12 +53,14 @@ index 0000000..a7d2dd4
 +		}
 +		defer closeApp(a, lk)
 +		ids := make([]string, 0, len(jids))
++		groups := make(map[string][]string, len(jids))
 +		seen := make(map[string]bool, len(jids))
 +		for _, jid := range jids {
 +			aliases, err := messageChatJIDFilter(ctx, a, jid.String())
 +			if err != nil {
 +				return err
 +			}
++			groups[jid.String()] = aliases
 +			for _, alias := range aliases {
 +				if !seen[alias] {
 +					ids = append(ids, alias)
@@ -66,7 +68,7 @@ index 0000000..a7d2dd4
 +				}
 +			}
 +		}
-+		return out.WriteJSON(os.Stdout, map[string]any{"chat_ids": ids})
++		return out.WriteJSON(os.Stdout, map[string]any{"chat_ids": ids, "groups": groups})
 +	}}
 +	resolve.Flags().StringArrayVar(&chats, "chat", nil, "stable chat JID (repeat for a verified identity union)")
 +	_ = resolve.MarkFlagRequired("chat")
@@ -75,10 +77,10 @@ index 0000000..a7d2dd4
 +}
 diff --git a/cmd/wacli/content_policy_test.go b/cmd/wacli/content_policy_test.go
 new file mode 100644
-index 0000000..62a6842
+index 0000000..a16e833
 --- /dev/null
 +++ b/cmd/wacli/content_policy_test.go
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,183 @@
 +package main
 +
 +import (
@@ -172,7 +174,8 @@ index 0000000..62a6842
 +			}
 +			var envelope struct {
 +				Data struct {
-+					ChatIDs []string `json:"chat_ids"`
++					ChatIDs []string            `json:"chat_ids"`
++					Groups  map[string][]string `json:"groups"`
 +				} `json:"data"`
 +			}
 +			decoder := json.NewDecoder(strings.NewReader(stdout))
@@ -195,7 +198,8 @@ index 0000000..62a6842
 +		}
 +		var envelope struct {
 +			Data struct {
-+				ChatIDs []string `json:"chat_ids"`
++				ChatIDs []string            `json:"chat_ids"`
++				Groups  map[string][]string `json:"groups"`
 +			} `json:"data"`
 +		}
 +		if err := json.NewDecoder(strings.NewReader(stdout)).Decode(&envelope); err != nil {
@@ -204,6 +208,9 @@ index 0000000..62a6842
 +		want := []string{"15551234567@s.whatsapp.net", "999123456789@lid", "777@lid", "123-456@g.us"}
 +		if !reflect.DeepEqual(envelope.Data.ChatIDs, want) {
 +			t.Fatalf("batch aliases=%v want %v", envelope.Data.ChatIDs, want)
++		}
++		if !reflect.DeepEqual(envelope.Data.Groups["15551234567@s.whatsapp.net"], []string{"15551234567@s.whatsapp.net", "999123456789@lid"}) || !reflect.DeepEqual(envelope.Data.Groups["777@lid"], []string{"777@lid"}) {
++			t.Fatalf("identity groups must preserve verified membership: %v", envelope.Data.Groups)
 +		}
 +	})
 +	assertNoSQLiteSidecars(t, filepath.Join(dir, "session.db"))
