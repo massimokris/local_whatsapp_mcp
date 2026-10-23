@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,10 +49,10 @@ func TestProviderLaunchKeepsSecretsOutOfArgumentsAndTargetsOnlyPublicListener(t 
 func TestTunnelShutdownWaitsUntilOwnedProcessExits(t *testing.T) {
 	pidfile := filepath.Join(t.TempDir(), "provider.pid")
 	supervisor := &tunnelSupervisor{}
-	supervisor.Start(CommandSpec{Executable: "/bin/sh", Args: []string{"-c", "echo $$ > " + shellQuote(pidfile) + "; exec /bin/sleep 60"}}, "invalid.example")
+	supervisor.Start(CommandSpec{Executable: "/bin/sh", Args: []string{"-c", "echo $$ > " + shellQuote(pidfile) + "; exec /bin/sleep 60"}}, "invalid.example", tunnelTestHelper(t))
 	defer supervisor.Stop()
 	var pid int
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
 		if b, e := os.ReadFile(pidfile); e == nil {
 			pid, _ = strconv.Atoi(strings.TrimSpace(string(b)))
 			break
@@ -64,5 +65,74 @@ func TestTunnelShutdownWaitsUntilOwnedProcessExits(t *testing.T) {
 	supervisor.Stop()
 	if err := syscall.Kill(pid, 0); err == nil {
 		t.Fatal("provider remains alive after Quit")
+	}
+}
+
+func TestTunnelOwnerFixture(t *testing.T) {
+	if os.Getenv("LWMCP_TUNNEL_OWNER_FIXTURE") != "1" {
+		return
+	}
+	dir := os.Getenv("LWMCP_TUNNEL_FIXTURE_DIR")
+	supervisor := &tunnelSupervisor{}
+	supervisor.Start(CommandSpec{Executable: "/bin/sh", Args: []string{"-c", "echo $$ > " + shellQuote(filepath.Join(dir, "provider.pid")) + "; sleep 60 & echo $! > " + shellQuote(filepath.Join(dir, "descendant.pid")) + "; wait"}, Env: []string{"NGROK_AUTHTOKEN=private-fixture"}}, "invalid.example", tunnelTestHelper(t))
+	time.Sleep(60 * time.Second)
+	supervisor.Stop()
+}
+
+func TestTunnelProviderAndDescendantStopAfterAbruptServiceDeath(t *testing.T) {
+	dir := t.TempDir()
+	owner := exec.Command(os.Args[0], "-test.run=^TestTunnelOwnerFixture$")
+	owner.Env = append(os.Environ(), "LWMCP_TUNNEL_OWNER_FIXTURE=1", "LWMCP_TUNNEL_FIXTURE_DIR="+dir)
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { owner.Process.Kill(); owner.Wait() }()
+	pids := []int{}
+	defer func() {
+		for _, pid := range pids {
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}()
+	for _, name := range []string{"provider.pid", "descendant.pid"} {
+		var pid int
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if b, e := os.ReadFile(filepath.Join(dir, name)); e == nil {
+				pid, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+				if pid > 0 {
+					break
+				}
+			}
+		}
+		if pid == 0 {
+			t.Fatal("provider did not start")
+		}
+		pids = append(pids, pid)
+	}
+	owner.Process.Kill()
+	owner.Wait()
+	for _, pid := range pids {
+		for deadline := time.Now().Add(7 * time.Second); time.Now().Before(deadline) && syscall.Kill(pid, 0) == nil; time.Sleep(10 * time.Millisecond) {
+		}
+		if syscall.Kill(pid, 0) == nil {
+			t.Fatalf("provider process %d survived service death", pid)
+		}
+	}
+}
+
+func tunnelTestHelper(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tunnel-worker")
+	script := "#!/bin/sh\nexec " + shellQuote(os.Args[0]) + " -test.run=^TestTunnelWorkerFixture$ -- tunnel-worker\n"
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+func TestTunnelWorkerFixture(t *testing.T) {
+	if os.Args[len(os.Args)-1] != "tunnel-worker" {
+		return
+	}
+	if err := RunTunnelWorker(os.Stdin); err != nil {
+		t.Fatal(err)
 	}
 }

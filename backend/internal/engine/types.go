@@ -13,12 +13,13 @@ type Policy struct {
 	ChatIDs  []string `json:"chat_ids"`
 }
 type Chat struct {
-	ContactName  string `json:"contact_name,omitempty"`
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Phone        string `json:"phone"`
-	Kind         string `json:"kind"`
-	LastActivity string `json:"last_activity"`
+	Aliases      []string `json:"aliases,omitempty"`
+	ContactName  string   `json:"contact_name,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Phone        string   `json:"phone"`
+	Kind         string   `json:"kind"`
+	LastActivity string   `json:"last_activity"`
 }
 type Status struct {
 	Linked      bool   `json:"linked"`

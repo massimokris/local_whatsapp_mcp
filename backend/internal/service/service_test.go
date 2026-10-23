@@ -308,3 +308,83 @@ func (e *mediaEngine) Call(ctx context.Context, write bool, args ...string) (jso
 	}
 	return e.fixtureEngine.Call(ctx, write, args...)
 }
+
+func TestFailedAgentChangesRemainVisibleAndConsistentAfterRestart(t *testing.T) {
+	for _, method := range []string{"DELETE", "PATCH"} {
+		t.Run(method, func(t *testing.T) {
+			dir := t.TempDir()
+			opt := service.Options{CursorKey: []byte("01234567890123456789012345678901"), DataDir: dir}
+			s, err := service.New(opt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { s.Close() }()
+			request := func(method, path, body string) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				s.ControlHandler().ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(body)))
+				return w
+			}
+			request("PUT", "/scope", `{"mode":"all"}`)
+			var invite map[string]string
+			json.Unmarshal(request("POST", "/pairing", `{"name":"Keep visible","client":"stdio"}`).Body.Bytes(), &invite)
+			var grant map[string]string
+			json.Unmarshal(request("POST", "/pairing/redeem", `{"token":"`+invite["token"]+`"}`).Body.Bytes(), &grant)
+			if r := request("PATCH", "/agents/"+grant["id"], `{"send_enabled":true}`); r.Code != 200 {
+				t.Fatal(r.Body)
+			}
+			// Make the settings destination unwritable without relying on user permissions.
+			path := dir + "/settings.json"
+			if err := os.Rename(path, path+".saved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if r := request(method, "/agents/"+grant["id"], `{"send_enabled":false}`); r.Code == 200 {
+				t.Fatal("failed settings write reported success")
+			}
+			assertPrior := func() {
+				t.Helper()
+				body := request("GET", "/state", "").Body.String()
+				if !strings.Contains(body, `"name":"Keep visible"`) || !strings.Contains(body, `"send_enabled":true`) {
+					t.Fatalf("failed change hidden in UI: %s", body)
+				}
+				if _, err := s.VerifyToken(context.Background(), grant["secret"]); err != nil {
+					t.Fatal("failed revocation changed authorization", err)
+				}
+			}
+			assertPrior()
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".saved", path); err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			s, err = service.New(opt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertPrior()
+			if r := request(method, "/agents/"+grant["id"], `{"send_enabled":false}`); r.Code != 200 {
+				t.Fatal("retry failed", r.Body)
+			}
+			s.Close()
+			s, err = service.New(opt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := request("GET", "/state", "").Body.String()
+			if method == "DELETE" {
+				if strings.Contains(body, "Keep visible") {
+					t.Fatal("revoked agent restored")
+				}
+				if _, err := s.VerifyToken(context.Background(), grant["secret"]); err == nil {
+					t.Fatal("revoked credential restored")
+				}
+			} else if strings.Contains(body, `"send_enabled":true`) {
+				t.Fatal("sending restored")
+			}
+		})
+	}
+}

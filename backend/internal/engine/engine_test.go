@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -63,17 +64,53 @@ func TestPinnedEngineStructuredBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	session, err := sql.Open("sqlite3", filepath.Join(dir, "store", "session.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = session.Exec(`CREATE TABLE IF NOT EXISTS whatsmeow_lid_map (lid TEXT PRIMARY KEY, pn TEXT UNIQUE NOT NULL); INSERT INTO whatsmeow_lid_map VALUES ('999', '123')`); err != nil {
+		t.Fatal(err)
+	}
+	session.Close()
 	e := engine.New(binary, dir)
 	chats, err := e.Catalog(context.Background())
 	if err != nil || len(chats) != 1 || chats[0].Name != "Work" {
 		t.Fatal(chats, err)
 	}
+	if !reflect.DeepEqual(chats[0].Aliases, []string{"123@s.whatsapp.net", "999@lid"}) {
+		t.Fatalf("catalog lacks verified migrated identity: %+v", chats)
+	}
 	ids, err := e.Resolve(context.Background(), "123@s.whatsapp.net")
-	if err != nil || len(ids) != 1 {
+	if err != nil || len(ids) != 2 {
 		t.Fatal(ids, err)
 	}
 	raw, err := e.Call(context.Background(), false, "messages", "list", "--chat", "123@s.whatsapp.net")
 	if err != nil || !strings.Contains(string(raw), "fixture hello") {
 		t.Fatal(string(raw), err)
+	}
+}
+
+func TestLiveProgressReportsSyncingWithoutClaimingHistoryImport(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "wacli")
+	script := `#!/bin/sh
+printf '%s\n' '{"event":"policy_loaded","data":{"revision":2}}' '{"event":"connected"}' '{"event":"progress"}' >&2
+exec /bin/cat >/dev/null
+`
+	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	e := engine.New(bin, dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := e.Start(ctx, engine.Policy{Version: 1, Revision: 2, Mode: "all"}, false); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop(ctx)
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline) && e.Status().Status != "syncing"; time.Sleep(time.Millisecond) {
+	}
+	status := e.Status()
+	if status.Status != "syncing" || strings.Contains(status.Detail, "Importing") || status.LastEventAt == "" {
+		t.Fatalf("misleading live progress: %+v", status)
 	}
 }

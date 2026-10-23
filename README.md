@@ -1,33 +1,42 @@
 # LocalWhatsAppMCP
 
-A native macOS menu bar app that connects your WhatsApp to your preferred agents through **MCP**. Keep messages on your Mac, choose which chats agents can access, and optionally let each agent send text and attachments.
+A native macOS menu bar app that connects your WhatsApp to your preferred agents through **MCP**. Keep messages on your Mac, choose which chats agents can access, and enable sending independently for each agent.
 
-**Status:** specification and planning. The app has not been implemented or packaged yet.
+**Status:** implemented and packaged for local installation and testing. The current package targets Apple silicon and macOS 13 or newer; it was tested on the build Mac. It is ad-hoc signed, not Developer ID signed or notarized. See [acceptance evidence and remaining live checks](docs/acceptance.md).
 
-## Planned experience
+## Install and connect
 
-1. Connect WhatsApp by scanning a QR code. The app saves the history WhatsApp makes available.
-2. Continue with all chats, or select specific chats and groups to keep synced and accessible to agents.
-3. Give your local agent the generated setup instructions and one-time pairing token.
-4. Manage connected agents and enable message sending individually when wanted.
-5. Optionally connect cloud agents through ngrok or Cloudflare Tunnel, configured by your local agent.
+Open `dist/LocalWhatsAppMCP-0.1.0-arm64.dmg`, drag the app to Applications, and launch it. Open its menu bar icon, then:
 
-The app stays in the menu bar and opens at login. It respects Mac sleep; cloud access depends on the Mac and app being available. Attachments download on demand. Your agent handles summaries, task extraction, recurring work, and notifications.
+1. Connect WhatsApp by scanning the QR code from WhatsApp’s Linked Devices screen.
+2. Continue with all chats, or select the chats and groups to retain and make available to agents.
+3. Give your local agent the generated setup instructions and one-time pairing token. The bundled helper saves its credential in Keychain and configures the connection.
+4. Enable sending for individual agents when wanted. Reading access starts immediately after pairing.
+5. Optionally use [cloud setup](docs/cloud-setup.md) for ngrok or a named Cloudflare Tunnel.
 
-## Architecture
+The panel can close while sync and MCP access continue. Quit stops the app-owned processes. The app honors Mac sleep, and cloud access depends on the Mac being awake and the app running. Launch at login uses native macOS registration and may require OS approval. WhatsApp controls how much history is available; attachments download on demand. Your agent handles reasoning, schedules, and notifications.
 
-**SwiftUI + AppKit** provide the native app, following the visual style of [Open Ratio in the Dock project](/Users/massi/development/dock). A bundled **Go** service exposes MCP through the official Go SDK and coordinates a pinned **wacli** executable. Messages and linked-device state use **SQLite**; app-managed secrets use **macOS Keychain**.
+Messages, linked-device state, configuration, and cached media live in `~/Library/Application Support/LocalWhatsAppMCP/`. Replacing the app preserves that data. [Installation and signing details](docs/building.md#local-installation) explain the local build’s Gatekeeper behavior.
 
-## Project documents
+## Build and verify
 
-- [Specification](SPEC.md): agreed behavior, stack, boundaries, and acceptance scenarios.
-- [Wayfinder map](docs/wayfinder/map.md): decisions and technical integration research.
-- [UI reference](docs/ui-reference.md): source-grounded visual conventions.
+On macOS with Xcode command line tools, a valid macOS SDK, Swift 5.9 or newer, Git, and Go 1.27.3:
+
+```sh
+./scripts/test.sh
+./scripts/package.sh
+python3 ./scripts/smoke-bundle.py dist/LocalWhatsAppMCP.app
+```
+
+`test.sh` runs native, backend race, pinned-engine, and packaging checks. `package.sh` creates the app, DMG, ZIP, and SHA256 files under `dist/`; `./scripts/build.sh` builds only the app. The bundle smoke test uses synthetic data and temporary Keychain credentials. Live account and provider setup remain part of your installation test. See [the build guide](docs/building.md) for individual commands, target architectures, signing, and notarization.
+
+## Architecture and project documents
+
+SwiftUI/AppKit provides the native app. A bundled Go service enforces scope and agent permissions through the official MCP Go SDK, and coordinates a pinned wacli executable. wacli owns the WhatsApp connection and SQLite/FTS5 archive; app-managed secrets use macOS Keychain.
+
+- [Specification](SPEC.md): accepted behavior and acceptance scenarios.
 - [Domain language](CONTEXT.md): shared terminology.
-- [Agent instructions](AGENTS.md): where to read before changing the project.
-
-## Development
-
-There is no build or installation command yet. The planned distribution is a native `.app` and `.dmg`, built with Swift Package Manager and Go. Build requirements and supported macOS versions will be documented when the actual package is verified.
-
-Start with [AGENTS.md](AGENTS.md) and the [local tracker](docs/agents/issue-tracker.md) when continuing the work.
+- [UI reference](docs/ui-reference.md): Dock visual conventions adapted for this app.
+- [Component interfaces](docs/implementation/interfaces.md): service, engine, and native boundaries.
+- [Wayfinder map](docs/wayfinder/map.md): decisions and integration research.
+- [Agent instructions](AGENTS.md): reading routes and working agreements.

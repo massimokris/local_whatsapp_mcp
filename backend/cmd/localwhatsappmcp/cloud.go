@@ -36,6 +36,9 @@ func init() {
 	extraCommand = runCloud
 }
 func runCloud(args []string) error {
+	if len(args) > 0 && args[0] == "tunnel-worker" {
+		return cloud.RunTunnelWorker(os.Stdin)
+	}
 	if len(args) > 0 && args[0] == "cloud-authorize" {
 		return errors.New("This browser handoff is not valid. Use freshly generated cloud setup instructions in the app, then connect your cloud agent in the browser opened by the helper.")
 	}

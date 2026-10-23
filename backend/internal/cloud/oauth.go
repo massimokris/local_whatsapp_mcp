@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/go-oauth2/oauth2/v4/manage"
+	"github.com/massi/localwhatsappmcp/internal/persistence"
 	"net/http"
 	"net/url"
 	"os"
@@ -159,33 +160,7 @@ func atomicJSON(path string, v any) error {
 	if e = os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 		return e
 	}
-	f, e := os.CreateTemp(filepath.Dir(path), ".cloud-*")
-	if e != nil {
-		return e
-	}
-	defer os.Remove(f.Name())
-	if e = f.Chmod(0600); e == nil {
-		_, e = f.Write(b)
-	}
-	if e == nil {
-		e = f.Sync()
-	}
-	ce := f.Close()
-	if e == nil {
-		e = ce
-	}
-	if e == nil {
-		e = os.Rename(f.Name(), path)
-	}
-	if e == nil {
-		d, de := os.Open(filepath.Dir(path))
-		if de != nil {
-			return de
-		}
-		e = d.Sync()
-		d.Close()
-	}
-	return e
+	return persistence.Write(path, b, 0600)
 }
 func contains(a []string, s string) bool {
 	for _, v := range a {

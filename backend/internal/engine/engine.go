@@ -188,9 +188,12 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 					e.status.QR = ""
 					e.status.Detail = "Connected. Available history may still arrive."
 					e.status.Linked = true
-				case "history_sync", "progress":
-					e.status.Status = "importing"
-					e.status.Detail = "Importing available history supplied by WhatsApp."
+				case "history_sync":
+					e.status.Status = "syncing"
+					e.status.Detail = "Receiving available history from WhatsApp. History coverage may be partial."
+				case "progress":
+					e.status.Status = "syncing"
+					e.status.Detail = "Receiving WhatsApp updates. Available history may still arrive."
 				case "disconnected":
 					e.status.Status = "connecting"
 					e.status.Detail = "Reconnecting to WhatsApp."
@@ -341,6 +344,33 @@ func (e *Engine) Catalog(ctx context.Context) ([]Chat, error) {
 	}
 	if rows.Err() != nil {
 		return nil, fmt.Errorf("local chat catalog could not finish reading")
+	}
+	rows.Close()
+	// Resolve in bounded batches through wacli; names and phone formatting never
+	// establish equivalence, and the companion does not read session keys.
+	for start := 0; start < len(out); start += 256 {
+		end := min(start+256, len(out))
+		args := []string{"policy", "resolve"}
+		for _, chat := range out[start:end] {
+			args = append(args, "--chat", chat.ID)
+		}
+		raw, err := e.Call(ctx, false, args...)
+		if err != nil {
+			return nil, err
+		}
+		var resolved struct {
+			Groups map[string][]string `json:"groups"`
+		}
+		if json.Unmarshal(raw, &resolved) != nil || resolved.Groups == nil {
+			return nil, errors.New("verified chat identities are unavailable; reinstall the complete app")
+		}
+		for i := start; i < end; i++ {
+			aliases, ok := resolved.Groups[out[i].ID]
+			if !ok || len(aliases) == 0 {
+				return nil, errors.New("verified chat identities are incomplete; retry after sync")
+			}
+			out[i].Aliases = aliases
+		}
 	}
 	return out, nil
 }

@@ -13,6 +13,10 @@ public actor HelperRuntime {
     public let wacli: URL
     public let dataDirectory: URL
     private var service: Process?
+    private var owner: FileHandle?
+    private var diagnostics: StartupDiagnostics?
+    private var diagnosticPipe: Pipe?
+    private var retryAfter = Date.distantPast
     private var stopping = false
     public init(helper: URL, wacli: URL, dataDirectory: URL) {
         self.helper = helper; self.wacli = wacli; self.dataDirectory = dataDirectory
@@ -20,20 +24,40 @@ public actor HelperRuntime {
     public var processIdentifier: Int32? { service?.isRunning == true ? service?.processIdentifier : nil }
     public func start() throws {
         guard !stopping, service?.isRunning != true else { return }
+        if service != nil, Date() < retryAfter {
+            throw diagnostics?.failure ?? HelperFailure("The local service stopped. Retrying shortly; reopen the app if this continues.")
+        }
+        try? owner?.close(); owner = nil
+        diagnosticPipe?.fileHandleForReading.readabilityHandler = nil
+        try? diagnosticPipe?.fileHandleForReading.close()
         guard FileManager.default.isExecutableFile(atPath: helper.path), FileManager.default.isExecutableFile(atPath: wacli.path) else {
             throw HelperFailure("The bundled service is missing. Reinstall the complete LocalWhatsAppMCP app.")
         }
         let process = Process()
         process.executableURL = helper
-        process.arguments = ["serve", "--data-dir", dataDirectory.path, "--wacli", wacli.path, "--helper", helper.path]
+        process.arguments = ["serve", "--owner-stdin", "--data-dir", dataDirectory.path, "--wacli", wacli.path, "--helper", helper.path]
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        process.standardInput = FileHandle.nullDevice
+        let capture = StartupDiagnostics(), errors = Pipe()
+        errors.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
+            else { capture.append(data) }
+        }
+        process.standardError = errors
+        diagnostics = capture; diagnosticPipe = errors
+        let lifetime = Pipe()
+        process.standardInput = lifetime.fileHandleForReading
         try process.run()
+        try errors.fileHandleForWriting.close()
+        try lifetime.fileHandleForReading.close()
+        owner = lifetime.fileHandleForWriting
         service = process
+        retryAfter = Date().addingTimeInterval(5)
     }
     public func stop() async {
         stopping = true
+        try? owner?.close()
+        owner = nil
         guard let process = service else { return }
         if process.isRunning {
             process.terminate()
@@ -43,10 +67,21 @@ public actor HelperRuntime {
             process.waitUntilExit()
         }
         service = nil
+        diagnosticPipe?.fileHandleForReading.readabilityHandler = nil
+        try? diagnosticPipe?.fileHandleForReading.close()
+        diagnosticPipe = nil
     }
     public func control(method: String, path: String, body: Data? = nil) async throws -> Data {
         guard !stopping else { throw HelperFailure("The local service is stopping.") }
-        return try await Self.run(helper: helper, arguments: ["control", "--data-dir", dataDirectory.path, "--method", method, "--path", path], input: body)
+        if service?.isRunning == false {
+            throw diagnostics?.failure ?? HelperFailure("The local service stopped. Reopen the app or wait for it to retry.")
+        }
+        do {
+            return try await Self.run(helper: helper, arguments: ["control", "--data-dir", dataDirectory.path, "--method", method, "--path", path], input: body)
+        } catch {
+            if service?.isRunning == false, let failure = diagnostics?.failure { throw failure }
+            throw error
+        }
     }
     public func authorizeCloud(request: String) async throws {
         guard !stopping else { throw HelperFailure("The local service is stopping.") }
@@ -75,4 +110,34 @@ public actor HelperRuntime {
             return result
         }.value
     }
+}
+
+/// Drains stderr without keeping logs. Only a fixed startup code becomes UI copy.
+private final class StartupDiagnostics: @unchecked Sendable {
+    private let lock = NSLock()
+    private var prefix = Data()
+    func append(_ data: Data) {
+        lock.lock(); defer { lock.unlock() }
+        prefix.append(data.prefix(max(0, 8192 - prefix.count)))
+    }
+    var failure: HelperFailure? {
+        lock.lock(); let bytes = prefix; lock.unlock()
+        for line in bytes.split(separator: 10) {
+            guard let value = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: String],
+                  let code = value["startup_error"], let message = Self.messages[code] else { continue }
+            return HelperFailure(message)
+        }
+        return nil
+    }
+    private static let messages = [
+        "configuration_missing": "Saved settings.json is missing. Restore it in the app’s Application Support folder before reopening this archive.",
+        "configuration_invalid": "Saved settings.json is invalid. Restore a valid copy in the app’s Application Support folder and retry.",
+        "keychain_unavailable": "The app credential is unavailable in macOS Keychain. Unlock the login keychain and reopen the app; repair its saved credential if this continues.",
+        "port_in_use": "The local MCP port is in use. Quit the other LocalWhatsAppMCP service and retry.",
+        "already_running": "Another LocalWhatsAppMCP service is still running. Quit that app instance and retry.",
+        "writer_stopping": "The previous WhatsApp connection is still stopping. Wait briefly, then reopen the app.",
+        "control_unavailable": "The private app connection could not start. Check access to the app’s Application Support folder and reopen the app.",
+        "storage_unavailable": "The app could not access its saved files. Check permissions and free space in its Application Support folder, then retry.",
+        "startup_failed": "The bundled service could not start. Reopen the app; reinstall the complete app if this continues."
+    ]
 }

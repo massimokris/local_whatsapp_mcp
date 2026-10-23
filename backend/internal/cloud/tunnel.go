@@ -106,7 +106,7 @@ func (t *tunnelSupervisor) set(status, detail string) {
 	t.status = tunnelStatus{status, detail}
 	t.mu.Unlock()
 }
-func (t *tunnelSupervisor) Start(spec CommandSpec, hostname string) {
+func (t *tunnelSupervisor) Start(spec CommandSpec, hostname, helper string) {
 	t.Stop()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -119,13 +119,26 @@ func (t *tunnelSupervisor) Start(spec CommandSpec, hostname string) {
 		delay := time.Second
 		for ctx.Err() == nil {
 			t.set("connecting", "Starting the saved cloud connection…")
-			cmd := exec.Command(spec.Executable, spec.Args...)
-			cmd.Env = append(cleanProviderEnvironment(os.Environ()), spec.Env...)
+			cmd := exec.Command(helper, "tunnel-worker")
+			cmd.Env = cleanProviderEnvironment(os.Environ())
+			lifetime, err := cmd.StdinPipe()
+			if err != nil {
+				t.set("attention", "The private tunnel ownership channel could not open.")
+				return
+			}
 			cmd.Stdout = io.Discard
 			cmd.Stderr = io.Discard
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			if err := cmd.Start(); err != nil {
+				lifetime.Close()
 				t.set("attention", "The tunnel executable could not start. Run cloud setup to repair it.")
+				return
+			}
+			if err := json.NewEncoder(lifetime).Encode(spec); err != nil {
+				lifetime.Close()
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				t.set("attention", "The private tunnel command could not be delivered.")
 				return
 			}
 			exited := make(chan error, 1)
@@ -135,10 +148,10 @@ func (t *tunnelSupervisor) Start(spec CommandSpec, hostname string) {
 			for running {
 				select {
 				case <-ctx.Done():
-					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+					_ = lifetime.Close()
 					select {
 					case <-exited:
-					case <-time.After(5 * time.Second):
+					case <-time.After(7 * time.Second):
 						_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 						<-exited
 					}
@@ -146,6 +159,7 @@ func (t *tunnelSupervisor) Start(spec CommandSpec, hostname string) {
 					t.set("disabled", "Cloud access is off.")
 					return
 				case <-exited:
+					lifetime.Close()
 					ticker.Stop()
 					running = false
 					t.set("attention", "Cloud connection stopped. Check provider login or network; retrying automatically.")
