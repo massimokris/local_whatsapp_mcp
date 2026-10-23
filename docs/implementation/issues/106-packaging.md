@@ -1,7 +1,7 @@
 # Distribution tooling
 
 - ID: `LW-106`
-- Status: open
+- Status: closed
 - Labels: `wayfinder:task`
 - Mode: AFK
 - Parent: [Implementation plan](../plan.md)

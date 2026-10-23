@@ -1,7 +1,7 @@
 # Scoped WhatsApp engine
 
 - ID: `LW-101`
-- Status: open
+- Status: closed
 - Labels: `wayfinder:task`
 - Mode: AFK
 - Parent: [Implementation plan](../plan.md)

@@ -1,7 +1,7 @@
 # Service and local agent access
 
 - ID: `LW-102`
-- Status: open
+- Status: closed
 - Labels: `wayfinder:task`
 - Mode: AFK
 - Parent: [Implementation plan](../plan.md)

@@ -1,6 +1,6 @@
 # Installation and acceptance
 
-This is a local **0.1.0** implementation for installation testing. The checked build is Apple silicon (`arm64`), ad-hoc signed, with a macOS 13 deployment target verified in all three Mach-O executables. Runtime checks ran on the build Mac; neither Intel nor every supported macOS version has been exercised. Developer ID signing and notarization require the owner's release credentials.
+This is a local **0.1.0** implementation for installation testing. The checked build is Apple silicon (`arm64`), ad-hoc signed, with a macOS 13 deployment target verified in all three Mach-O executables. Runtime checks ran on macOS 26.5.2; neither Intel nor every supported macOS version has been exercised. Developer ID signing and notarization require the owner's release credentials.
 
 ## Install and first use
 
@@ -22,13 +22,13 @@ The [build instructions](building.md) provide repeatable commands. These checks 
 | --- | --- |
 | Initial capture, all/selected storage, fail-closed policy | Pinned-engine tests cover policy load before store opening, selected payload rejection, preserved minimal catalog, and initial/all modes. |
 | Side records and alternate content paths | Engine fixtures cover FTS, reactions/edits, calls/stars, poll reference targets, webhook/media queues, phone retry, cached file copying, and final text/file dispatch. |
-| Identity aliases | Engine fixtures use verified LID/phone mappings and reject identity guesses. Final review additionally requires picker canonicalization after migration. |
+| Identity aliases | Engine fixtures use verified LID/phone mappings and reject identity guesses. Native and real-engine fixtures also verify picker canonicalization after migration. |
 | Scope transitions and restart | Service fixtures exercise policy revision acknowledgement, a failed transition across restart, retained excluded archive, and current-scope checks. |
 | Independent agents and sending | Actual MCP handler fixtures exercise one-time pairing, separate credentials, revocation, direct send-tool denial, unselected destinations, and request identifiers preventing duplicate sends. |
 | Reading, updates, files | Tests cover bounded reads/search/context, scoped encrypted checkpoints, checkpoint invalidation after scope changes, cached attachment denial, and chunked attachment content. The real pinned engine is also exercised against a synthetic SQLite archive. |
 | OAuth and cloud separation | Tests exercise discovery, dynamic registration and wrong-client rejection, the expected redirect flow, PKCE, CSRF, one-use private browser bootstrap, handoff expiry, hash-only persistence, restart, refresh rotation, and revocation. Private controls remain absent from the public listener. CIMD fetching is implemented but not verified against a live hosted client. |
-| Tunnel management | Synthetic executable tests check loopback routing, credential-free process arguments, startup, and awaited shutdown. Actual provider login/DNS and provider retry behavior remain unexecuted. |
-| Native UI | Swift model/runtime tests and seven rendered light/dark surfaces cover selection/search, service ownership, fail-closed state defaults, callbacks, and graceful demo Quit. The rendered demo QR was decoded through Vision. |
+| Tunnel management | Synthetic executable tests check loopback routing, credential-free process arguments, startup, awaited shutdown, and process/descendant cleanup after owner SIGKILL. Actual provider login/DNS and provider retry behavior remain unexecuted. |
+| Native UI | Ten Swift model/runtime tests and seven rendered light/dark surfaces cover selection/search, service ownership, fail-closed state defaults, callbacks, and graceful demo Quit. The rendered demo QR was decoded through Vision. |
 | Packaging | Real Mach-O fixtures verify helper presence, metadata, architectures, minimum OS load commands, dynamic library dependencies, signatures, and callback scheme. The DMG was mounted read-only and the ZIP extracted for bundle verification. |
 
 The [integration review](implementation/reviews/2026-10-23.md) records independent Standards and Spec findings and resolution status. Final verification results are recorded in the [distribution resolution](implementation/comments/105-distribution.md).
