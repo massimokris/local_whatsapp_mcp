@@ -15,6 +15,7 @@ The user authorized end-to-end implementation, local commits, isolated implement
 | [Service and local agent access](issues/102-service.md) | none | Go service, policy, MCP, private control, pairing/helper |
 | [Native menu bar app](issues/103-native.md) | none | SwiftUI/AppKit onboarding, management, lifecycle |
 | [Cloud connection](issues/104-cloud.md) | service | OAuth, tunnel supervision, private provider setup |
+| [Distribution tooling](issues/106-packaging.md) | native | Reproducible app/DMG build and bundle checks |
 | [Distribution and acceptance](issues/105-distribution.md) | all preceding | Integrated tests, review, app/DMG, installation documentation |
 
 ## Agreed test boundaries
