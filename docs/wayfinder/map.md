@@ -1,7 +1,7 @@
 # LocalWhatsAppMCP v1 decision map
 
 - ID: `LW-MAP`
-- Status: open
+- Status: closed
 - Labels: `wayfinder:map`
 - Owner: massi
 - Created: 2026-10-23
@@ -23,6 +23,8 @@ An implementation-ready [LocalWhatsAppMCP v1 specification](../../SPEC.md) that 
 
 - [Define the v1 product contract](issues/001-product-contract.md) — the conversation settled the v1 experience, access boundaries, operating behavior, stack, and visual reference.
 - [Enforce selected chats across ingestion and MCP access](issues/002-selective-storage.md) — keep a narrow policy patch inside wacli and independent per-request access checks in the Go wrapper; the research identifies write paths, side effects, identity handling, and the policy transition.
+
+- [Preserve one-time pairing across MCP client connections](issues/003-agent-pairing.md) — local helper/Keychain installation and a grant-bound browser handoff preserve the fixed setup experience; provider credential import has a concrete private route. Live client/provider checks remain explicit.
 
 ## Not yet specified
 

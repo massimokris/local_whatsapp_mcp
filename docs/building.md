@@ -39,8 +39,10 @@ LocalWhatsAppMCP.app/Contents/
   Resources/ThirdPartyNotices.txt
 ```
 
-The bundle registers `localwhatsappmcp://` for native cloud authorization,
-declares menu bar behavior, and includes an original generated icon. Build
+The bundle registers the validated `localwhatsappmcp://` callback scheme,
+declares menu bar behavior, and includes an original generated icon. Current
+cloud authorization uses a private browser handoff; unsolicited callbacks
+cannot grant access. Build
 information records the source commit, tracked changes, engine pin/patch hash,
 tool versions, SDK, and target. Inputs are pinned and commands repeatable;
 code-signing timestamps, filesystem metadata, and toolchain output mean the
@@ -66,6 +68,11 @@ an Apple-notarized public release. A downloaded copy can trigger Gatekeeper;
 after confirming its provenance, use the standard Privacy & Security approval
 for that app. Do not disable Gatekeeper globally. Launch at login uses the
 installed app and may require the operating system's approval.
+
+For the verified boundaries and live-account checklist, see [installation and
+acceptance](acceptance.md). After building, `python3 scripts/smoke-bundle.py`
+checks the actual helper, Keychain, and MCP bridge using disposable data. It
+requires an unlocked usable Keychain and removes its own entries on exit.
 
 ## Release signing and notarization
 
