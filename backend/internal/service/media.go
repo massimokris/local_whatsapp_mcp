@@ -157,6 +157,17 @@ func (s *Service) getAttachment(ctx context.Context, t AttachmentRequest) (any, 
 	if s.opt.Engine == nil {
 		return nil, errors.New("archive is not connected")
 	}
+	// Exact media lookup does not expand identity aliases; resolve the retained
+	// message through the read command, then authorize its canonical identity.
+	shown, err := s.opt.Engine.Call(ctx, false, "messages", "show", "--chat", t.ChatID, "--id", t.MessageID)
+	if err != nil {
+		return nil, err
+	}
+	var parent archiveMessage
+	if json.Unmarshal(shown, &parent) != nil || parent.MsgID != t.MessageID || !s.allowed(ctx, p, parent.ChatJID) {
+		return nil, ErrScope
+	}
+	t.ChatID = parent.ChatJID
 	dir := filepath.Join(s.opt.DataDir, "attachments")
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return nil, errors.New("cannot create private attachment cache")

@@ -278,6 +278,19 @@ type mediaEngine struct {
 }
 
 func (e *mediaEngine) Call(ctx context.Context, write bool, args ...string) (json.RawMessage, error) {
+	if len(args) > 1 && args[0] == "messages" && args[1] == "show" {
+		var chat, id string
+		for i, a := range args {
+			if a == "--chat" {
+				chat = args[i+1]
+			}
+			if a == "--id" {
+				id = args[i+1]
+			}
+		}
+		b, _ := json.Marshal(map[string]string{"ChatJID": chat, "MsgID": id})
+		return b, nil
+	}
 	if args[0] == "media" {
 		for i, a := range args {
 			if a == "--output" {

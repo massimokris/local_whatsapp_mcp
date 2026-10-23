@@ -281,7 +281,17 @@ func (e *Engine) Call(ctx context.Context, write bool, args ...string) (json.Raw
 	return env.Data, nil
 }
 func (e *Engine) Resolve(ctx context.Context, id string) ([]string, error) {
-	b, err := e.Call(ctx, false, "policy", "resolve", "--chat", id)
+	return e.ResolveMany(ctx, []string{id})
+}
+func (e *Engine) ResolveMany(ctx context.Context, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return []string{}, nil
+	}
+	args := []string{"policy", "resolve"}
+	for _, id := range ids {
+		args = append(args, "--chat", id)
+	}
+	b, err := e.Call(ctx, false, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -289,10 +299,11 @@ func (e *Engine) Resolve(ctx context.Context, id string) ([]string, error) {
 		ChatIDs []string `json:"chat_ids"`
 	}
 	if json.Unmarshal(b, &result) != nil || len(result.ChatIDs) == 0 {
-		return nil, errors.New("verified conversation identity could not be resolved")
+		return nil, errors.New("verified conversation identities could not be resolved")
 	}
 	return result.ChatIDs, nil
 }
+
 func (e *Engine) Catalog(ctx context.Context) ([]Chat, error) {
 	path := filepath.Join(e.dir, "store", "wacli.db")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
