@@ -1,0 +1,1195 @@
+diff --git a/cmd/wacli/auth.go b/cmd/wacli/auth.go
+index aabf5bf..963d33f 100644
+--- a/cmd/wacli/auth.go
++++ b/cmd/wacli/auth.go
+@@ -93,7 +93,7 @@ func runAuth(flags *rootFlags, opts authOptions) (appPkg.SyncResult, error) {
+ 	}
+ 	// Pairing carries these limits, so they must be set before the handshake.
+ 	wa.SetHistorySyncLimits(validated.historyLimits)
+-	ctx, stop := signalContextWithEvents(out.NewEventWriter(os.Stderr, flags.events))
++	ctx, stop := ownedSignalContext(flags, out.NewEventWriter(os.Stderr, flags.events))
+ 	defer stop()
+ 
+ 	a, lk, err := newApp(ctx, flags, true, true)
+diff --git a/cmd/wacli/content_policy.go b/cmd/wacli/content_policy.go
+new file mode 100644
+index 0000000..1c41beb
+--- /dev/null
++++ b/cmd/wacli/content_policy.go
+@@ -0,0 +1,42 @@
++package main
++
++import (
++	"fmt"
++	"os"
++	"strings"
++
++	"github.com/openclaw/wacli/internal/out"
++	"github.com/spf13/cobra"
++	"go.mau.fi/whatsmeow/types"
++)
++
++// This metadata-only command gives the companion the same verified identities
++// as the archive without requiring it to read or write WhatsApp session state.
++func newContentPolicyCmd(flags *rootFlags) *cobra.Command {
++	root := &cobra.Command{Use: "policy", Short: "Companion content policy integration"}
++	var chat string
++	resolve := &cobra.Command{Use: "resolve", Short: "Resolve a stable chat identity and verified local aliases", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
++		jid, err := types.ParseJID(chat)
++		if err != nil || jid.IsEmpty() || !strings.Contains(chat, "@") || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer && jid.Server != types.GroupServer) {
++			return fmt.Errorf("a stable chat JID is required")
++		}
++		ro := *flags
++		ro.readOnly = true
++		ctx, cancel := withTimeout(cmd.Context(), &ro)
++		defer cancel()
++		a, lk, err := newApp(ctx, &ro, false, false)
++		if err != nil {
++			return err
++		}
++		defer closeApp(a, lk)
++		ids, err := messageChatJIDFilter(ctx, a, jid.ToNonAD().String())
++		if err != nil {
++			return err
++		}
++		return out.WriteJSON(os.Stdout, map[string]any{"chat_ids": ids})
++	}}
++	resolve.Flags().StringVar(&chat, "chat", "", "stable chat JID")
++	_ = resolve.MarkFlagRequired("chat")
++	root.AddCommand(resolve)
++	return root
++}
+diff --git a/cmd/wacli/content_policy_test.go b/cmd/wacli/content_policy_test.go
+new file mode 100644
+index 0000000..c0fa644
+--- /dev/null
++++ b/cmd/wacli/content_policy_test.go
+@@ -0,0 +1,156 @@
++package main
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/json"
++	"github.com/openclaw/wacli/internal/app"
++	"github.com/openclaw/wacli/internal/out"
++	"go.mau.fi/whatsmeow/types"
++	"io"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/store"
++)
++
++func TestContentPolicyRejectsCachedMediaBeforeCopy(t *testing.T) {
++	dir := t.TempDir()
++	db, err := store.Open(filepath.Join(dir, "wacli.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	chat := "111@s.whatsapp.net"
++	data := []byte("synthetic private media")
++	hash := sha256.Sum256(data)
++	cached := filepath.Join(dir, "cached")
++	if err := os.WriteFile(cached, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertChat(chat, "dm", "Synthetic", time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(store.UpsertMessageParams{ChatJID: chat, MsgID: "old", Timestamp: time.Now(), MediaType: "audio", DirectPath: "expired", MediaKey: make([]byte, 32), FileSHA256: hash[:], FileLength: uint64(len(data))}); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.MarkMediaDownloaded(chat, "old", cached, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	db.Close()
++	policy := filepath.Join(dir, "policy.json")
++	if err := os.WriteFile(policy, []byte(`{"version":1,"revision":2,"mode":"selected","chat_ids":[]}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	for _, mode := range []string{"read-only", "writable"} {
++		t.Run(mode, func(t *testing.T) {
++			target := filepath.Join(dir, "output-"+mode)
++			args := []string{"--store", dir, "--content-policy", policy, "--json", "media", "download", "--chat", chat, "--id", "old", "--output", target}
++			if mode == "read-only" {
++				args = append([]string{"--read-only"}, args...)
++			}
++			stdout, stderr, err := runPresenceDelegateHelper(t, args)
++			if err == nil || !strings.Contains(stderr, "content excluded") {
++				t.Fatalf("excluded cache result error=%v out=%s err=%s", err, stdout, stderr)
++			}
++			if _, err := os.Stat(target); !os.IsNotExist(err) {
++				t.Fatalf("excluded bytes published: %v", err)
++			}
++		})
++	}
++}
++
++func TestContentPolicyResolveReturnsOnlyVerifiedAliases(t *testing.T) {
++	dir := t.TempDir()
++	db, err := store.Open(filepath.Join(dir, "wacli.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	db.Close()
++	writeTestSessionLIDMap(t, filepath.Join(dir, "session.db"), "999123456789", "15551234567")
++	policy := filepath.Join(dir, "policy.json")
++	if err := os.WriteFile(policy, []byte(`{"version":1,"revision":2,"mode":"selected","chat_ids":[]}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	for _, tc := range []struct {
++		chat string
++		want []string
++	}{
++		{"15551234567:2@s.whatsapp.net", []string{"15551234567@s.whatsapp.net", "999123456789@lid"}},
++		{"999123456789@lid", []string{"999123456789@lid", "15551234567@s.whatsapp.net"}},
++		{"777@lid", []string{"777@lid"}},
++		{"123-456@g.us", []string{"123-456@g.us"}},
++	} {
++		t.Run(tc.chat, func(t *testing.T) {
++			stdout, stderr, err := runPresenceDelegateHelper(t, []string{"--store", dir, "--content-policy", policy, "--read-only", "--json", "policy", "resolve", "--chat", tc.chat})
++			if err != nil {
++				t.Fatalf("resolve failed %v out=%s err=%s", err, stdout, stderr)
++			}
++			var envelope struct {
++				Data struct {
++					ChatIDs []string `json:"chat_ids"`
++				} `json:"data"`
++			}
++			decoder := json.NewDecoder(strings.NewReader(stdout))
++			if err := decoder.Decode(&envelope); err != nil {
++				t.Fatal(err)
++			}
++			if !reflect.DeepEqual(envelope.Data.ChatIDs, tc.want) {
++				t.Fatalf("aliases=%v want %v", envelope.Data.ChatIDs, tc.want)
++			}
++		})
++	}
++	assertNoSQLiteSidecars(t, filepath.Join(dir, "session.db"))
++}
++
++func TestContentPolicyOwnerPipeClosureStopsWriterContext(t *testing.T) {
++	reader, writer := io.Pipe()
++	defer reader.Close()
++	defer writer.Close()
++	var events bytes.Buffer
++	ctx, stop := signalContextWithOwner(out.NewEventWriter(&events, true), reader)
++	defer stop()
++	select {
++	case <-ctx.Done():
++		t.Fatal("writer stopped while owner was alive")
++	default:
++	}
++	if _, err := writer.Write([]byte("keep ownership")); err != nil {
++		t.Fatal(err)
++	}
++	if err := writer.Close(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-ctx.Done():
++	case <-time.After(time.Second):
++		t.Fatal("orphan writer context remained active")
++	}
++	if !strings.Contains(events.String(), `"event":"owner_lost"`) {
++		t.Fatalf("missing owner-lost event: %s", events.String())
++	}
++}
++
++func TestContentPolicyRejectsOutboundTextAndFilesBeforeTransport(t *testing.T) {
++	dir := t.TempDir()
++	policy := filepath.Join(dir, "policy.json")
++	if err := os.WriteFile(policy, []byte(`{"version":1,"revision":2,"mode":"selected","chat_ids":[]}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	a, err := app.New(app.Options{StoreDir: filepath.Join(dir, "store"), ContentPolicyPath: policy})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer a.Close()
++	to := types.NewJID("222", types.DefaultUserServer)
++	// No transport is installed: rejection must precede client/file access.
++	if _, _, err := sendTextWithHistory(t.Context(), a, nil, to, "synthetic body", "", "", nil, nil, textEphemeralOptions{}, textSendOptions{}); err == nil || !strings.Contains(err.Error(), "content excluded") {
++		t.Fatalf("text dispatch not denied: %v", err)
++	}
++	if _, err := sendFile(t.Context(), a, to, filepath.Join(dir, "must-not-read"), sendFileOptions{}); err == nil || !strings.Contains(err.Error(), "content excluded") {
++		t.Fatalf("file dispatch not denied: %v", err)
++	}
++}
+diff --git a/cmd/wacli/media_download.go b/cmd/wacli/media_download.go
+index 34b4073..4a6ab3e 100644
+--- a/cmd/wacli/media_download.go
++++ b/cmd/wacli/media_download.go
+@@ -42,7 +42,14 @@ func downloadExactMedia(ctx context.Context, flags *rootFlags, chat, id, output
+ 	reader, _, preflightErr := newApp(ctx, &roFlags, false, false)
+ 	var info store.MediaDownloadInfo
+ 	var target string
++	if preflightErr != nil && flags.contentPolicyPath != "" {
++		return nil, preflightErr
++	}
+ 	if preflightErr == nil {
++		if err := reader.CheckContentScope(ctx, chat); err != nil {
++			reader.Close()
++			return nil, err
++		}
+ 		info, preflightErr = reader.DB().GetMediaDownloadInfo(chat, id)
+ 		if preflightErr == nil {
+ 			target, preflightErr = reader.ResolveMediaOutputPath(info, output)
+@@ -149,6 +156,7 @@ func requireMediaMetadata(info store.MediaDownloadInfo) error {
+ // This narrow boundary permits a protocol fake in tests while exercising the
+ // real SQLite cache and output behavior used by both direct and owner requests.
+ type exactMediaDownloadApp interface {
++	CheckContentScope(context.Context, string) error
+ 	DB() *store.DB
+ 	WA() app.WAClient
+ 	ResolveMediaOutputPath(store.MediaDownloadInfo, string) (string, error)
+@@ -156,6 +164,9 @@ type exactMediaDownloadApp interface {
+ }
+ 
+ func executeExactMediaDownload(ctx context.Context, a exactMediaDownloadApp, chat, id string, retry bool) (*mediaDownloadResult, error) {
++	if err := a.CheckContentScope(ctx, chat); err != nil {
++		return nil, err
++	}
+ 	info, err := a.DB().GetMediaDownloadInfo(chat, id)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/cmd/wacli/root.go b/cmd/wacli/root.go
+index 649f49f..7e9e525 100644
+--- a/cmd/wacli/root.go
++++ b/cmd/wacli/root.go
+@@ -42,14 +42,16 @@ func effectiveVersion() string {
+ const docsURL = "https://wacli.sh"
+ 
+ type rootFlags struct {
+-	storeDir   string
+-	account    string
+-	asJSON     bool
+-	fullOutput bool
+-	events     bool
+-	timeout    time.Duration
+-	readOnly   bool
+-	lockWait   time.Duration
++	contentPolicyPath string
++	ownerStdin        bool
++	storeDir          string
++	account           string
++	asJSON            bool
++	fullOutput        bool
++	events            bool
++	timeout           time.Duration
++	readOnly          bool
++	lockWait          time.Duration
+ }
+ 
+ func execute(args []string) error {
+@@ -68,6 +70,8 @@ func execute(args []string) error {
+ 	}
+ 	rootCmd.SetVersionTemplate("wacli {{.Version}}\n")
+ 
++	rootCmd.PersistentFlags().BoolVar(&flags.ownerStdin, "owner-stdin", false, "gracefully stop auth/sync when the owning process closes stdin")
++	rootCmd.PersistentFlags().StringVar(&flags.contentPolicyPath, "content-policy", "", "required versioned content policy snapshot for this process")
+ 	rootCmd.PersistentFlags().StringVar(&flags.storeDir, "store", "", "store directory (default: $WACLI_STORE_DIR, XDG state dir on Linux, or ~/.wacli)")
+ 	rootCmd.PersistentFlags().StringVar(&flags.account, "account", "", "named account from config.yaml")
+ 	rootCmd.PersistentFlags().BoolVar(&flags.asJSON, "json", false, "output JSON instead of human-readable text")
+@@ -78,6 +82,7 @@ func execute(args []string) error {
+ 	rootCmd.PersistentFlags().BoolVar(&flags.readOnly, "read-only", false, "reject commands that intentionally write WhatsApp or the local store (or set WACLI_READONLY=1)")
+ 
+ 	rootCmd.AddCommand(newVersionCmd())
++	rootCmd.AddCommand(newContentPolicyCmd(&flags))
+ 	rootCmd.AddCommand(newAccountsCmd(&flags))
+ 	rootCmd.AddCommand(newDoctorCmd(&flags))
+ 	rootCmd.AddCommand(newAuthCmd(&flags))
+@@ -132,12 +137,13 @@ func newApp(ctx context.Context, flags *rootFlags, needLock bool, allowUnauthed
+ 	}
+ 
+ 	a, err := app.New(app.Options{
+-		StoreDir:      storeDir,
+-		Version:       effectiveVersion(),
+-		JSON:          flags.asJSON,
+-		Events:        out.NewEventWriter(os.Stderr, flags.events),
+-		AllowUnauthed: allowUnauthed,
+-		ReadOnly:      flags.isReadOnly(),
++		StoreDir:          storeDir,
++		ContentPolicyPath: flags.contentPolicyPath,
++		Version:           effectiveVersion(),
++		JSON:              flags.asJSON,
++		Events:            out.NewEventWriter(os.Stderr, flags.events),
++		AllowUnauthed:     allowUnauthed,
++		ReadOnly:          flags.isReadOnly(),
+ 	})
+ 	if err != nil {
+ 		if lk != nil {
+diff --git a/cmd/wacli/send.go b/cmd/wacli/send.go
+index c8d7441..12cad6b 100644
+--- a/cmd/wacli/send.go
++++ b/cmd/wacli/send.go
+@@ -248,6 +248,7 @@ func persistOutboundTextWith(ctx context.Context, db *store.DB, resolver outboun
+ }
+ 
+ type sendTextApp interface {
++	CheckContentScope(context.Context, string) error
+ 	WA() app.WAClient
+ 	DB() *store.DB
+ }
+@@ -290,6 +291,9 @@ const defaultEphemeralExpiration uint32 = 7 * 24 * 60 * 60
+ var errSelfTextRecipient = errors.New("send text to the linked account itself is not supported: WhatsApp can acknowledge self-messages without delivering them; use the official Message Yourself chat")
+ 
+ func sendTextMessage(ctx context.Context, a sendTextApp, to types.JID, text, replyTo, replyToSender string, preview *linkpreview.Preview, mentionedJIDs []string, ephemeral textEphemeralOptions, options textSendOptions) (types.MessageID, error) {
++	if err := a.CheckContentScope(ctx, to.String()); err != nil {
++		return "", err
++	}
+ 	return sendTextMessageWithSender(ctx, a.WA(), a.DB(), to, text, replyTo, replyToSender, preview, mentionedJIDs, ephemeral, options)
+ }
+ 
+diff --git a/cmd/wacli/send_file.go b/cmd/wacli/send_file.go
+index 82ad320..fc905c9 100644
+--- a/cmd/wacli/send_file.go
++++ b/cmd/wacli/send_file.go
+@@ -68,9 +68,13 @@ type sendFileOutcome struct {
+ }
+ 
+ func sendFile(ctx context.Context, a interface {
++	CheckContentScope(context.Context, string) error
+ 	WA() app.WAClient
+ 	DB() *store.DB
+ }, to types.JID, filePath string, opts sendFileOptions) (sendFileOutcome, error) {
++	if err := a.CheckContentScope(ctx, to.String()); err != nil {
++		return sendFileOutcome{}, err
++	}
+ 	mediaAs, err := validateSendFileMediaOptions(opts.mediaAs, opts.ptt)
+ 	if err != nil {
+ 		return sendFileOutcome{}, err
+diff --git a/cmd/wacli/send_file_store_test.go b/cmd/wacli/send_file_store_test.go
+index e498de9..d95bba8 100644
+--- a/cmd/wacli/send_file_store_test.go
++++ b/cmd/wacli/send_file_store_test.go
+@@ -63,6 +63,8 @@ type fakeSendFileApp struct {
+ 	db *store.DB
+ }
+ 
++func (f *fakeSendFileApp) CheckContentScope(context.Context, string) error { return nil }
++
+ func (f *fakeSendFileApp) WA() app.WAClient { return f.wa }
+ func (f *fakeSendFileApp) DB() *store.DB    { return f.db }
+ 
+diff --git a/cmd/wacli/signal.go b/cmd/wacli/signal.go
+index f471aad..cb03dab 100644
+--- a/cmd/wacli/signal.go
++++ b/cmd/wacli/signal.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"context"
+ 	"fmt"
++	"io"
+ 	"os"
+ 	"os/signal"
+ 	"syscall"
+@@ -43,3 +44,25 @@ func signalContextForChannel(events *out.EventWriter, sigCh <-chan os.Signal, st
+ 		ctxCancel()
+ 	}
+ }
++
++// The companion keeps this pipe open. On a supervisor crash, EOF gives the
++// writer the same graceful cancellation as SIGTERM, including pending writes.
++// Scope recovery must still await the store lock; cancellation is not exit.
++func ownedSignalContext(flags *rootFlags, events *out.EventWriter) (context.Context, context.CancelFunc) {
++	if !flags.ownerStdin {
++		return signalContextWithEvents(events)
++	}
++	return signalContextWithOwner(events, os.Stdin)
++}
++
++func signalContextWithOwner(events *out.EventWriter, owner io.Reader) (context.Context, context.CancelFunc) {
++	ctx, stop := signalContextWithEvents(events)
++	go func() {
++		_, _ = io.Copy(io.Discard, owner)
++		if ctx.Err() == nil {
++			_ = events.Emit("owner_lost", map[string]any{"action": "shutdown"})
++			stop()
++		}
++	}()
++	return ctx, stop
++}
+diff --git a/cmd/wacli/sync.go b/cmd/wacli/sync.go
+index 52b0a38..561e489 100644
+--- a/cmd/wacli/sync.go
++++ b/cmd/wacli/sync.go
+@@ -65,7 +65,7 @@ func newSyncCmd(flags *rootFlags) *cobra.Command {
+ 			if err != nil {
+ 				return err
+ 			}
+-			ctx, stop := signalContextWithEvents(out.NewEventWriter(os.Stderr, flags.events))
++			ctx, stop := ownedSignalContext(flags, out.NewEventWriter(os.Stderr, flags.events))
+ 			defer stop()
+ 
+ 			a, lk, err := newApp(ctx, flags, true, false)
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 62746e9..7afe8af 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -112,15 +112,17 @@ type WAClient interface {
+ }
+ 
+ type Options struct {
+-	StoreDir      string
+-	Version       string
+-	JSON          bool
+-	Events        *out.EventWriter
+-	AllowUnauthed bool
+-	ReadOnly      bool
++	ContentPolicyPath string
++	StoreDir          string
++	Version           string
++	JSON              bool
++	Events            *out.EventWriter
++	AllowUnauthed     bool
++	ReadOnly          bool
+ }
+ 
+ type App struct {
++	contentPolicy           *contentPolicy
+ 	opts                    Options
+ 	waMu                    sync.Mutex
+ 	wa                      WAClient
+@@ -165,6 +167,10 @@ type App struct {
+ }
+ 
+ func New(opts Options) (*App, error) {
++	policy, policyErr := loadContentPolicy(opts.ContentPolicyPath)
++	if policyErr != nil {
++		return nil, policyErr
++	}
+ 	if opts.StoreDir == "" {
+ 		return nil, fmt.Errorf("store dir is required")
+ 	}
+@@ -189,7 +195,11 @@ func New(opts Options) (*App, error) {
+ 
+ 	chatStateSync := make(chan struct{}, 1)
+ 	chatStateSync <- struct{}{}
+-	return &App{opts: opts, db: db, chatStateSync: chatStateSync}, nil
++	a := &App{opts: opts, db: db, chatStateSync: chatStateSync, contentPolicy: policy}
++	if policy != nil {
++		a.emitEvent("policy_loaded", map[string]any{"revision": policy.Revision, "mode": policy.Mode})
++	}
++	return a, nil
+ }
+ 
+ func (a *App) OpenWA() error {
+diff --git a/internal/app/content_policy.go b/internal/app/content_policy.go
+new file mode 100644
+index 0000000..0ed0dfa
+--- /dev/null
++++ b/internal/app/content_policy.go
+@@ -0,0 +1,95 @@
++package app
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"strings"
++
++	"go.mau.fi/whatsmeow/types"
++)
++
++// contentPolicy is immutable for one process. The supervisor must stop and
++// await every old writer before atomically replacing the file and restarting.
++type contentPolicy struct {
++	allowed  map[string]struct{}
++	Version  int      `json:"version"`
++	Revision int64    `json:"revision"`
++	Mode     string   `json:"mode"`
++	ChatIDs  []string `json:"chat_ids"`
++}
++
++func loadContentPolicy(path string) (*contentPolicy, error) {
++	if path == "" {
++		return nil, nil
++	} // Preserve standalone upstream behavior.
++	file, err := os.Open(path)
++	if err != nil {
++		return nil, fmt.Errorf("content policy cannot be opened")
++	}
++	defer file.Close()
++	var p contentPolicy
++	decoder := json.NewDecoder(io.LimitReader(file, 4<<20))
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&p); err != nil {
++		return nil, fmt.Errorf("content policy is invalid")
++	}
++	if err := decoder.Decode(new(any)); err != io.EOF {
++		return nil, fmt.Errorf("content policy has trailing data")
++	}
++	if p.Version != 1 || p.Revision < 1 {
++		return nil, fmt.Errorf("content policy version or revision is invalid")
++	}
++	if p.Mode != "initial" && p.Mode != "all" && p.Mode != "selected" {
++		return nil, fmt.Errorf("content policy mode is invalid")
++	}
++	p.allowed = make(map[string]struct{}, len(p.ChatIDs))
++	for _, raw := range p.ChatIDs {
++		jid, err := types.ParseJID(raw)
++		if err != nil || jid.IsEmpty() || strings.TrimSpace(raw) != raw || jid.User == "" || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer && jid.Server != types.GroupServer) {
++			return nil, fmt.Errorf("content policy contains an invalid chat identity")
++		}
++		p.allowed[jid.ToNonAD().String()] = struct{}{}
++	}
++	return &p, nil
++}
++
++// errContentSkipped distinguishes intentional exclusion from successful content
++// storage and from a persistence failure. Callers must not emit content side
++// effects or count a skipped message as retained.
++var errContentSkipped = errors.New("content excluded by chat scope")
++
++// CheckContentScope gates bytes before cache access, downloads, and retries.
++// Read-only callers use the existing read-only session identity resolver.
++func (a *App) CheckContentScope(ctx context.Context, raw string) error {
++	if a.contentPolicy == nil || a.contentPolicy.Mode != "selected" {
++		return nil
++	}
++	jid, err := types.ParseJID(raw)
++	if err != nil || jid.IsEmpty() {
++		return errContentSkipped
++	}
++	candidates := []types.JID{canonicalJID(jid)}
++	var resolver LocalResolver
++	if a.wa != nil {
++		resolver = a.wa
++	} else {
++		resolver, _ = a.ReadOnlyResolver()
++	}
++	if resolver != nil {
++		canonical := canonicalJID(resolver.ResolveLIDToPN(ctx, jid))
++		candidates = append(candidates, canonical)
++		if canonical.Server == types.DefaultUserServer {
++			candidates = append(candidates, canonicalJID(resolver.ResolvePNToLID(ctx, canonical)))
++		}
++	}
++	for _, candidate := range candidates {
++		if _, ok := a.contentPolicy.allowed[candidate.ToNonAD().String()]; ok {
++			return nil
++		}
++	}
++	return errContentSkipped
++}
+diff --git a/internal/app/content_policy_test.go b/internal/app/content_policy_test.go
+new file mode 100644
+index 0000000..84b0783
+--- /dev/null
++++ b/internal/app/content_policy_test.go
+@@ -0,0 +1,340 @@
++package app
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"errors"
++	"fmt"
++	waProto "go.mau.fi/whatsmeow/binary/proto"
++	"go.mau.fi/whatsmeow/types"
++	"go.mau.fi/whatsmeow/types/events"
++	"google.golang.org/protobuf/proto"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/out"
++	"github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow/proto/waCommon"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++	"go.mau.fi/whatsmeow/proto/waHistorySync"
++	"go.mau.fi/whatsmeow/proto/waSyncAction"
++)
++
++func TestContentPolicyMustLoadBeforeOpeningStore(t *testing.T) {
++	for _, body := range []string{"", `{}`, `{"version":2,"revision":1,"mode":"all"}`, `{"version":1,"revision":1,"mode":"typo"}`, `{"version":1,"revision":1,"mode":"selected","chat_ids":["invalid"]}`} {
++		t.Run(body, func(t *testing.T) {
++			dir := t.TempDir()
++			policy := filepath.Join(dir, "policy.json")
++			if body != "" {
++				if err := os.WriteFile(policy, []byte(body), 0600); err != nil {
++					t.Fatal(err)
++				}
++			}
++			if a, err := New(Options{StoreDir: filepath.Join(dir, "store"), ContentPolicyPath: policy}); err == nil {
++				a.Close()
++				t.Fatal("invalid required policy opened store")
++			}
++			if _, err := os.Stat(filepath.Join(dir, "store")); !os.IsNotExist(err) {
++				t.Fatalf("store created before policy validation: %v", err)
++			}
++		})
++	}
++	var events bytes.Buffer
++	dir := t.TempDir()
++	policy := filepath.Join(dir, "policy.json")
++	if err := os.WriteFile(policy, []byte(`{"version":1,"revision":17,"mode":"selected","chat_ids":[]}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	a, err := New(Options{StoreDir: filepath.Join(dir, "store"), ContentPolicyPath: policy, Events: out.NewEventWriter(&events, true)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer a.Close()
++	if !strings.Contains(events.String(), `"event":"policy_loaded"`) || !strings.Contains(events.String(), `"revision":17`) {
++		t.Fatalf("missing policy acknowledgement: %s", events.String())
++	}
++}
++
++func TestContentPolicySyncRetainsCatalogButSkipsExcludedPayloads(t *testing.T) {
++	dir := t.TempDir()
++	path := filepath.Join(dir, "policy.json")
++	if err := os.WriteFile(path, []byte(`{"version":1,"revision":1,"mode":"selected","chat_ids":["111@s.whatsapp.net"]}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	a, err := New(Options{StoreDir: filepath.Join(dir, "store"), ContentPolicyPath: path})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer a.Close()
++	f := newFakeWA()
++	a.wa = f
++	allowed := types.NewJID("111", types.DefaultUserServer)
++	excluded := types.NewJID("222", types.DefaultUserServer)
++	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
++	live := func(chat types.JID, id string) *events.Message {
++		return &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: chat}, ID: id, Timestamp: base}, Message: &waProto.Message{Conversation: proto.String("synthetic retained content")}}
++	}
++	f.connectEvents = []any{live(allowed, "allowed"), live(excluded, "excluded"), historySyncWithTextMessages(excluded, base, "late-history")}
++	ctx, cancel := context.WithCancel(t.Context())
++	defer cancel()
++	res, err := a.Sync(ctx, SyncOptions{Mode: SyncModeFollow, AfterConnect: func(context.Context) error { cancel(); return nil }})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if res.MessagesStored != 1 {
++		t.Fatalf("stored %d messages, want 1", res.MessagesStored)
++	}
++	if n, err := a.DB().CountMessages(); err != nil || n != 1 {
++		t.Fatalf("archive count %d, error %v", n, err)
++	}
++	if _, err := a.DB().GetMessage(excluded.String(), "excluded"); !errors.Is(err, sql.ErrNoRows) {
++		t.Fatalf("excluded content persisted: %v", err)
++	}
++	catalog, err := a.DB().GetChat(excluded.String())
++	if err != nil || catalog.LastMessageTS.IsZero() {
++		t.Fatalf("excluded catalog missing activity: %+v / %v", catalog, err)
++	}
++}
++
++func policyTestApp(t *testing.T, mode, ids string) (*App, *fakeWA) {
++	t.Helper()
++	dir := t.TempDir()
++	path := filepath.Join(dir, "policy.json")
++	if err := os.WriteFile(path, []byte(`{"version":1,"revision":1,"mode":"`+mode+`","chat_ids":`+ids+`}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	a, err := New(Options{StoreDir: filepath.Join(dir, "store"), ContentPolicyPath: path})
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(a.Close)
++	f := newFakeWA()
++	a.wa = f
++	return a, f
++}
++func syncPolicyFixture(t *testing.T, a *App, opts SyncOptions) SyncResult {
++	t.Helper()
++	ctx, cancel := context.WithCancel(t.Context())
++	defer cancel()
++	opts.Mode = SyncModeFollow
++	opts.AfterConnect = func(context.Context) error { cancel(); return nil }
++	result, err := a.Sync(ctx, opts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return result
++}
++func TestContentPolicyExcludesCallAndStarSideRecords(t *testing.T) {
++	a, f := policyTestApp(t, "selected", `[]`)
++	chat := types.NewJID("222", types.DefaultUserServer)
++	when := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
++	// This previously captured row is allowed to remain after scope removal.
++	if err := a.DB().UpsertChat(chat.String(), "dm", "Synthetic", when); err != nil {
++		t.Fatal(err)
++	}
++	if err := a.DB().UpsertMessage(store.UpsertMessageParams{ChatJID: chat.String(), MsgID: "old", Timestamp: when, Text: "old retained content"}); err != nil {
++		t.Fatal(err)
++	}
++	f.connectEvents = []any{
++		&events.CallOffer{BasicCallMeta: types.BasicCallMeta{From: chat, CallCreator: chat, CallID: "excluded-call", Timestamp: when}},
++		&events.Star{ChatJID: chat, MessageID: "old", Timestamp: when, Action: &waSyncAction.StarAction{Starred: proto.Bool(true)}},
++	}
++	syncPolicyFixture(t, a, SyncOptions{})
++	calls, err := a.DB().ListCallEvents(store.ListCallEventsParams{Limit: 10})
++	if err != nil || len(calls) != 0 {
++		t.Fatalf("excluded calls=%+v err=%v", calls, err)
++	}
++	msg, err := a.DB().GetMessage(chat.String(), "old")
++	if err != nil || msg.Starred {
++		t.Fatalf("excluded star mutated archive: %+v err=%v", msg, err)
++	}
++}
++
++func TestContentPolicyBlocksPhoneRetryAndQueuedMedia(t *testing.T) {
++	a, f := policyTestApp(t, "selected", `[]`)
++	chat := "222@s.whatsapp.net"
++	if err := a.DB().UpsertChat(chat, "dm", "Synthetic", time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	insertMediaMessage(t, a, chat, "old", time.Now())
++	if _, err := a.RetryMediaMessage(t.Context(), chat, "old", time.Millisecond); err == nil || !strings.Contains(err.Error(), "content excluded") {
++		t.Fatalf("phone retry was not denied: %v", err)
++	}
++	if len(f.mediaRetryReceipts) != 0 {
++		t.Fatalf("phone was contacted: %v", f.mediaRetryReceipts)
++	}
++	result, err := a.BackfillMedia(t.Context(), BackfillMediaOptions{})
++	if err != nil || result.Downloaded != 0 {
++		t.Fatalf("excluded queued media downloaded: %+v %v", result, err)
++	}
++	info, err := a.DB().GetMediaDownloadInfo(chat, "old")
++	if err != nil || info.LocalPath != "" {
++		t.Fatalf("excluded attachment persisted: %+v %v", info, err)
++	}
++}
++
++func TestContentPolicyCatalogKeepsHistoryConversationsWithoutRetainedMessages(t *testing.T) {
++	a, f := policyTestApp(t, "selected", `[]`)
++	f.connectEvents = []any{&events.HistorySync{Data: &waHistorySync.HistorySync{Conversations: []*waHistorySync.Conversation{{ID: proto.String("222@s.whatsapp.net"), Name: proto.String("Synthetic new chat"), ConversationTimestamp: proto.Uint64(1704067200)}}}}}
++	syncPolicyFixture(t, a, SyncOptions{})
++	chat, err := a.DB().GetChat("222@s.whatsapp.net")
++	if err != nil || chat.Name != "Synthetic new chat" || chat.LastMessageTS.IsZero() {
++		t.Fatalf("history catalog lost: %+v err=%v", chat, err)
++	}
++}
++
++func TestContentPolicyPollReferencesCannotMutateExcludedChats(t *testing.T) {
++	for _, reference := range []string{"222@s.whatsapp.net", "111@s.whatsapp.net"} {
++		t.Run(reference, func(t *testing.T) {
++			a, f := policyTestApp(t, "selected", `["111@s.whatsapp.net"]`)
++			allowed := types.NewJID("111", types.DefaultUserServer)
++			hidden := "222@s.whatsapp.net"
++			when := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
++			if err := a.DB().UpsertPoll(store.Poll{ChatJID: hidden, MsgID: "old-poll", Question: "hidden question", Options: []string{"Yes"}, CreatedAt: when}); err != nil {
++				t.Fatal(err)
++			}
++			f.decryptPollVoteFunc = func(*events.Message) (*waE2E.PollVoteMessage, error) {
++				hash := sha256.Sum256([]byte("Yes"))
++				return &waE2E.PollVoteMessage{SelectedOptions: [][]byte{hash[:]}}, nil
++			}
++			f.connectEvents = []any{&events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: allowed, Sender: allowed}, ID: "new-vote", Timestamp: when}, Message: &waProto.Message{PollUpdateMessage: &waProto.PollUpdateMessage{PollCreationMessageKey: &waCommon.MessageKey{ID: proto.String("old-poll"), RemoteJID: proto.String(reference)}}}}}
++			syncPolicyFixture(t, a, SyncOptions{})
++			votes, err := a.DB().ListPollVotes(hidden, "old-poll")
++			if err != nil || len(votes) != 0 {
++				t.Fatalf("excluded poll updated via reference/fallback: %+v %v", votes, err)
++			}
++		})
++	}
++}
++
++func TestContentPolicyInitialAllAndVerifiedAliases(t *testing.T) {
++	for _, tc := range []struct {
++		name, mode, ids string
++		want            int64
++	}{
++		{"initial capture", "initial", `[]`, 3}, {"persistent all", "all", `[]`, 3}, {"empty selection", "selected", `[]`, 0}, {"selected LID", "selected", `["999@lid"]`, 1}, {"selected group", "selected", `["123-456@g.us"]`, 1},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			a, f := policyTestApp(t, tc.mode, tc.ids)
++			pn := types.NewJID("111", types.DefaultUserServer)
++			lid := types.NewJID("999", types.HiddenUserServer)
++			f.lids[lid] = pn
++			for i, chat := range []types.JID{pn, types.NewJID("222", types.DefaultUserServer), types.NewJID("123-456", types.GroupServer)} {
++				f.connectEvents = append(f.connectEvents, &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: chat}, ID: fmt.Sprint(i), Timestamp: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), PushName: "Same name"}, Message: &waProto.Message{Conversation: proto.String("synthetic body")}})
++			}
++			res := syncPolicyFixture(t, a, SyncOptions{})
++			if res.MessagesStored != tc.want {
++				t.Fatalf("retained=%d want=%d", res.MessagesStored, tc.want)
++			}
++			if tc.name == "selected LID" {
++				if _, err := a.DB().GetMessage(pn.String(), "0"); err != nil {
++					t.Fatal("selection did not survive verified LID-to-phone migration", err)
++				}
++			}
++		})
++	}
++}
++
++func TestContentPolicySkipsPayloadSideTablesAndFTS(t *testing.T) {
++	a, f := policyTestApp(t, "selected", `[]`)
++	chat := types.NewJID("222", types.DefaultUserServer)
++	when := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
++	payloads := map[string]*waProto.Message{
++		"poll":     {PollCreationMessageV3: &waProto.PollCreationMessage{Name: proto.String("secretsynthetic"), Options: []*waProto.PollCreationMessage_Option{{OptionName: proto.String("Yes")}}}},
++		"location": {LocationMessage: &waProto.LocationMessage{DegreesLatitude: proto.Float64(12), DegreesLongitude: proto.Float64(34), Name: proto.String("secretsynthetic")}},
++		"reaction": {ReactionMessage: &waProto.ReactionMessage{Key: &waCommon.MessageKey{ID: proto.String("old")}, Text: proto.String("secret")}},
++		"media":    {ImageMessage: &waProto.ImageMessage{Caption: proto.String("secretsynthetic"), DirectPath: proto.String("/unavailable"), MediaKey: make([]byte, 32)}},
++	}
++	for id, payload := range payloads {
++		f.connectEvents = append(f.connectEvents, &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: chat}, ID: id, Timestamp: when}, Message: payload})
++	}
++	f.connectEvents = append(f.connectEvents, &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: types.StatusBroadcastJID, Sender: chat}, ID: "status", Timestamp: when}, Message: &waProto.Message{Conversation: proto.String("secretsynthetic")}})
++	result := syncPolicyFixture(t, a, SyncOptions{DownloadMedia: true, MaxMessages: 100})
++	if result.MessagesStored != 0 {
++		t.Fatalf("excluded payloads counted: %+v", result)
++	}
++	if _, err := a.DB().GetPoll(chat.String(), "poll"); !errors.Is(err, sql.ErrNoRows) {
++		t.Fatalf("poll persisted: %v", err)
++	}
++	if _, err := a.DB().GetMessageLocation(chat.String(), "location"); !errors.Is(err, sql.ErrNoRows) {
++		t.Fatalf("location persisted: %v", err)
++	}
++	if _, err := a.DB().GetStatusMessage("status"); !errors.Is(err, sql.ErrNoRows) {
++		t.Fatalf("status persisted: %v", err)
++	}
++	if n, err := a.DB().CountMessages(); err != nil || n != 0 {
++		t.Fatalf("archive count=%d err=%v", n, err)
++	}
++	hits, err := a.DB().SearchMessages(store.SearchMessagesParams{Query: "secretsynthetic", Limit: 10})
++	if err != nil || len(hits) != 0 {
++		t.Fatalf("excluded content found in search: %+v %v", hits, err)
++	}
++	if _, err := os.Stat(filepath.Join(a.StoreDir(), "media")); !os.IsNotExist(err) {
++		t.Fatalf("excluded media output exists: %v", err)
++	}
++}
++
++func TestContentPolicyExcludedEventsNeverReachWebhook(t *testing.T) {
++	a, f := policyTestApp(t, "selected", `["111@s.whatsapp.net"]`)
++	allowed := types.NewJID("111", types.DefaultUserServer)
++	excluded := types.NewJID("222", types.DefaultUserServer)
++	received := make(chan string, 10)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, _ := io.ReadAll(r.Body)
++		received <- string(body)
++		w.WriteHeader(http.StatusNoContent)
++	}))
++	defer server.Close()
++	live := func(chat types.JID, id string) *events.Message {
++		return &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: chat}, ID: id, Timestamp: time.Now()}, Message: &waProto.Message{Conversation: proto.String(id)}}
++	}
++	f.connectEvents = []any{live(excluded, "excluded-body"), &events.Receipt{MessageSource: types.MessageSource{Chat: excluded, Sender: excluded}, MessageIDs: []types.MessageID{"excluded-id"}, Type: types.ReceiptTypeRead, Timestamp: time.Now()}, &events.ChatPresence{MessageSource: types.MessageSource{Chat: excluded, Sender: excluded}, State: types.ChatPresenceComposing}, live(allowed, "allowed-sentinel")}
++	all, _ := ParseSyncWebhookEvents("message,receipt,chat_presence")
++	ctx, cancel := context.WithCancel(t.Context())
++	defer cancel()
++	count := 0
++	_, err := a.Sync(ctx, SyncOptions{Mode: SyncModeFollow, WebhookURL: server.URL, WebhookAllowPrivate: true, WebhookEvents: all, AfterConnect: func(context.Context) error {
++		defer cancel()
++		for {
++			select {
++			case body := <-received:
++				count++
++				if strings.Contains(body, "excluded") || strings.Contains(body, "222") {
++					t.Errorf("excluded webhook emitted: %s", body)
++				}
++				if strings.Contains(body, "allowed-sentinel") {
++					return nil
++				}
++			case <-time.After(2 * time.Second):
++				return fmt.Errorf("allowed webhook did not arrive")
++			}
++		}
++	}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if count != 1 {
++		t.Fatalf("webhook count=%d want=1", count)
++	}
++}
++
++func TestContentPolicySkippedContentDoesNotFailSuccessfulSync(t *testing.T) {
++	a, f := policyTestApp(t, "selected", `[]`)
++	f.connectEvents = []any{historySyncWithTextMessages(types.NewJID("222", types.DefaultUserServer), time.Now(), "late")}
++	result, err := a.Sync(t.Context(), SyncOptions{Mode: SyncModeOnce, IdleExit: time.Millisecond, MaxMessages: 100})
++	if err != nil || result.MessagesStored != 0 {
++		t.Fatalf("skip failed sync: %+v %v", result, err)
++	}
++	last, err := a.DB().LastSuccessfulSync()
++	if err != nil || last == nil {
++		t.Fatalf("intentional skip was treated as persistence failure: %v %v", last, err)
++	}
++}
+diff --git a/internal/app/media.go b/internal/app/media.go
+index b5efecd..e672e07 100644
+--- a/internal/app/media.go
++++ b/internal/app/media.go
+@@ -225,6 +225,9 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
+ // fetched; a job that is already downloaded or lacks the metadata needed to
+ // download is skipped with downloaded=false and a nil error.
+ func (a *App) downloadMediaJob(ctx context.Context, job mediaJob) (downloaded bool, err error) {
++	if a.CheckContentScope(ctx, job.chatJID) != nil {
++		return false, nil
++	}
+ 	info, err := a.db.GetMediaDownloadInfo(job.chatJID, job.msgID)
+ 	if err != nil {
+ 		if err == sql.ErrNoRows {
+diff --git a/internal/app/media_retry.go b/internal/app/media_retry.go
+index 26e1328..ab0cde2 100644
+--- a/internal/app/media_retry.go
++++ b/internal/app/media_retry.go
+@@ -74,6 +74,9 @@ func (a *App) RetryMedia(ctx context.Context, opts RetryMediaOptions) (MediaRetr
+ // writable store and connected client; this method does not connect or lock.
+ // The complete attempt is bounded by thirty seconds and the caller's deadline.
+ func (a *App) RetryMediaMessage(ctx context.Context, chatJID, msgID string, wait time.Duration) (outcome MediaRetryOutcome, err error) {
++	if err := a.CheckContentScope(ctx, chatJID); err != nil {
++		return MediaRetryOutcome{}, err
++	}
+ 	chatJID, msgID = strings.TrimSpace(chatJID), strings.TrimSpace(msgID)
+ 	out := MediaRetryOutcome{ChatJID: chatJID, MsgID: msgID, Status: "error"}
+ 	if chatJID == "" || msgID == "" {
+@@ -153,6 +156,14 @@ func (a *App) retryMedia(ctx context.Context, opts RetryMediaOptions, exact *med
+ 	if err != nil {
+ 		return MediaRetryResult{}, fmt.Errorf("list pending media: %w", err)
+ 	}
++	// Never prepare a phone receipt or report an excluded record.
++	allowed := pending[:0]
++	for _, p := range pending {
++		if a.CheckContentScope(ctx, p.ChatJID) == nil {
++			allowed = append(allowed, p)
++		}
++	}
++	pending = allowed
+ 	result := MediaRetryResult{Requested: len(pending)}
+ 	if len(pending) == 0 {
+ 		if err := ctx.Err(); err != nil {
+@@ -452,6 +463,9 @@ func IsExpiredMediaDownload(err error) bool {
+ // path (e.g. a fresh one from a media-retry notification) rather than the one
+ // stored in the DB, then records the local path.
+ func (a *App) downloadMediaWithDirectPath(ctx context.Context, info store.MediaDownloadInfo, directPath string, reuploaded bool) (string, int64, error) {
++	if err := a.CheckContentScope(ctx, info.ChatJID); err != nil {
++		return "", 0, err
++	}
+ 	targetPath, err := a.ResolveMediaOutputPath(info, "")
+ 	if err != nil {
+ 		return "", 0, err
+diff --git a/internal/app/sync.go b/internal/app/sync.go
+index 6e700b0..7c356f0 100644
+--- a/internal/app/sync.go
++++ b/internal/app/sync.go
+@@ -2,6 +2,7 @@ package app
+ 
+ import (
+ 	"context"
++	"database/sql"
+ 	"errors"
+ 	"fmt"
+ 	"os"
+@@ -443,6 +444,16 @@ func (a *App) storeParsedMessage(ctx context.Context, pm wa.ParsedMessage, optio
+ 		}
+ 	}
+ 
++	if err := a.CheckContentScope(ctx, chatJID); err != nil {
++		// A revoke is protocol cleanup of an existing archive, not new content.
++		if pm.Revoked {
++			if deleteErr := a.db.MarkMessageRevoked(chatJID, pm.ID); deleteErr != nil && !errors.Is(deleteErr, sql.ErrNoRows) {
++				return deleteErr
++			}
++		}
++		return err
++	}
++
+ 	senderName := ""
+ 	if pm.FromMe {
+ 		senderName = "me"
+@@ -596,6 +607,10 @@ func (a *App) storeParsedCallEvent(ctx context.Context, call wa.ParsedCallEvent,
+ 		return err
+ 	}
+ 
++	if err := a.CheckContentScope(ctx, chatJID); err != nil {
++		return nil
++	}
++
+ 	senderJID := strings.TrimSpace(call.SenderJID)
+ 	if senderJID != "" {
+ 		if jid, err := types.ParseJID(senderJID); err == nil {
+diff --git a/internal/app/sync_events.go b/internal/app/sync_events.go
+index 68a076b..cbe8c03 100644
+--- a/internal/app/sync_events.go
++++ b/internal/app/sync_events.go
+@@ -137,7 +137,7 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 			if err := a.handleOutgoingReceiptEvent(ctx, v); err != nil && limits != nil {
+ 				limits.persistenceFailed.Store(true)
+ 			}
+-			if opts.WebhookEvents.Enabled(SyncWebhookEventReceipt) {
++			if a.CheckContentScope(ctx, v.Chat.String()) == nil && opts.WebhookEvents.Enabled(SyncWebhookEventReceipt) {
+ 				if job, ok := newSyncWebhookReceiptEvent(v); ok {
+ 					enqueueWebhook(job)
+ 				}
+@@ -145,7 +145,7 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 		case *events.ChatPresence:
+ 			// Deliberately does not touch lastEvent: typing notifications must
+ 			// not keep an idle-exit sync alive.
+-			if opts.WebhookEvents.Enabled(SyncWebhookEventChatPresence) {
++			if a.CheckContentScope(ctx, v.Chat.String()) == nil && opts.WebhookEvents.Enabled(SyncWebhookEventChatPresence) {
+ 				if job, ok := newSyncWebhookChatPresenceEvent(v); ok {
+ 					enqueueWebhook(job)
+ 				}
+@@ -580,6 +580,9 @@ func (a *App) linkedLiveCallIdentity() types.JID {
+ }
+ 
+ func (a *App) handleStarEvent(ctx context.Context, evt *events.Star) error {
++	if evt != nil && a.CheckContentScope(ctx, evt.ChatJID.String()) != nil {
++		return nil
++	}
+ 	if evt == nil || evt.ChatJID.IsEmpty() || strings.TrimSpace(evt.MessageID) == "" || evt.Action == nil {
+ 		return nil
+ 	}
+@@ -668,7 +671,7 @@ func (a *App) handleLiveSyncMessage(ctx context.Context, opts SyncOptions, v *ev
+ 		}
+ 		a.handlePollSideEffects(sideEffectCtx, pm, v)
+ 	}
+-	if opts.DownloadMedia && pm.Media != nil && pm.ID != "" {
++	if stored && opts.DownloadMedia && pm.Media != nil && pm.ID != "" {
+ 		enqueueMedia(canonicalJIDString(a.canonicalStoreJID(ctx, pm.Chat)), pm.ID)
+ 	}
+ }
+@@ -757,6 +760,36 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+ 		if chatID == "" {
+ 			continue
+ 		}
++		// Conversation names and recency belong to the local catalog even
++		// when every payload in this history chunk is excluded.
++		if chat, err := types.ParseJID(chatID); err == nil && !chat.IsEmpty() && chat != types.StatusBroadcastJID {
++			chat = a.canonicalStoreJID(ctx, chat)
++			ts := conv.GetLastMsgTimestamp()
++			if ts == 0 {
++				ts = conv.GetConversationTimestamp()
++			}
++			name := conv.GetName()
++			if name == "" && chat.Server != types.GroupServer {
++				name = a.wa.ResolveChatName(ctx, chat, "")
++			}
++			if name == "" {
++				name = chat.String()
++			}
++			var catalogErr error
++			if ts > 0 {
++				catalogErr = a.db.UpsertChat(canonicalJIDString(chat), chatKind(chat), name, time.Unix(int64(ts), 0))
++			} else {
++				catalogErr = a.db.UpsertChatMetadata(canonicalJIDString(chat), chatKind(chat), name)
++			}
++			if catalogErr != nil {
++				for _, limit := range limits {
++					if limit != nil {
++						limit.persistenceFailed.Store(true)
++					}
++				}
++				a.emitWarning("history_catalog_store_failed", "failed to retain history chat catalog", nil)
++			}
++		}
+ 		a.storeHistoryUnreadCount(ctx, chatID, conv)
+ 		var pendingPolls []historyPollSideEffect
+ 		for _, m := range conv.Messages {
+@@ -804,7 +837,9 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+ 			}
+ 			storedPM := pm
+ 			storedPM.UnhandledPayload = ""
++			stored := false
+ 			if err := a.storeParsedMessageForSync(ctx, storedPM, messageStoreOptions{}, limits...); err == nil {
++				stored = true
+ 				unhandledWarnings.observe(a, pm)
+ 				a.emitSyncProgress(messagesStored.Add(1))
+ 				if pm.Poll != nil || pm.PollAdd != nil || pm.PollVote != nil {
+@@ -814,7 +849,7 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+ 				a.handleHistoryPollSideEffectsBatch(context.WithoutCancel(ctx), pendingPolls)
+ 				return
+ 			}
+-			if opts.DownloadMedia && pm.Media != nil && pm.ID != "" {
++			if stored && opts.DownloadMedia && pm.Media != nil && pm.ID != "" {
+ 				enqueueMedia(canonicalJIDString(a.canonicalStoreJID(ctx, pm.Chat)), pm.ID)
+ 			}
+ 		}
+diff --git a/internal/app/sync_limits.go b/internal/app/sync_limits.go
+index d4aaf59..7706df8 100644
+--- a/internal/app/sync_limits.go
++++ b/internal/app/sync_limits.go
+@@ -2,6 +2,7 @@ package app
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"sync"
+ 	"sync/atomic"
+ 
+@@ -27,7 +28,7 @@ func (l *syncStorageLimits) canRecordFreshness() bool {
+ func (l *syncStorageLimits) StoreParsedMessage(ctx context.Context, pm wa.ParsedMessage, options messageStoreOptions) error {
+ 	if l.opts.MaxMessages <= 0 && l.opts.MaxDBSizeBytes <= 0 {
+ 		err := l.app.storeParsedMessage(ctx, pm, options)
+-		if err != nil {
++		if err != nil && !errors.Is(err, errContentSkipped) {
+ 			l.persistenceFailed.Store(true)
+ 		}
+ 		return err
+@@ -37,7 +38,9 @@ func (l *syncStorageLimits) StoreParsedMessage(ctx context.Context, pm wa.Parsed
+ 		return err
+ 	}
+ 	if err := l.app.storeParsedMessage(ctx, pm, options); err != nil {
+-		l.persistenceFailed.Store(true)
++		if !errors.Is(err, errContentSkipped) {
++			l.persistenceFailed.Store(true)
++		}
+ 		return err
+ 	}
+ 	if err := l.app.checkSyncStorageLimits(l.opts); err != nil {
+diff --git a/internal/app/sync_polls.go b/internal/app/sync_polls.go
+index 638bc7c..fa7952c 100644
+--- a/internal/app/sync_polls.go
++++ b/internal/app/sync_polls.go
+@@ -186,6 +186,9 @@ func (a *App) handlePollAddOption(ctx context.Context, pm wa.ParsedMessage, evt
+ 		)
+ 		return
+ 	}
++	if a.CheckContentScope(ctx, chatJID) != nil {
++		return
++	}
+ 	poll, err := a.db.GetPoll(chatJID, pollMsgID)
+ 	if err != nil {
+ 		if alt, altErr := a.db.FindPollByMsgID(pollMsgID); altErr == nil {
+@@ -199,6 +202,9 @@ func (a *App) handlePollAddOption(ctx context.Context, pm wa.ParsedMessage, evt
+ 			return
+ 		}
+ 	}
++	if a.CheckContentScope(ctx, poll.ChatJID) != nil {
++		return
++	}
+ 	if slices.Contains(poll.Options, option) {
+ 		return
+ 	}
+@@ -261,6 +267,9 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
+ 		return
+ 	}
+ 
++	if a.CheckContentScope(ctx, chatJID) != nil {
++		return
++	}
+ 	poll, err := a.db.GetPoll(chatJID, pollMsgID)
+ 	if err != nil {
+ 		// Fall back to msg-id-only lookup. WhatsApp re-keys self-poll
+@@ -285,6 +294,9 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
+ 		}
+ 	}
+ 
++	if a.CheckContentScope(ctx, poll.ChatJID) != nil {
++		return
++	}
+ 	decrypted, err := a.wa.DecryptPollVote(ctx, evt)
+ 	if err != nil {
+ 		a.emitWarning(

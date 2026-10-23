@@ -1,0 +1,3 @@
+# Unified diff context deliberately prefixes Go tab indentation with a space.
+# Applied source is checked by test.sh; do not lint diff syntax as source.
+*.patch -whitespace
