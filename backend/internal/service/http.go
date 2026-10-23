@@ -178,6 +178,7 @@ func (s *Service) AuthHandler(next http.Handler) http.Handler {
 		defer cancel()
 		stop := context.AfterFunc(generation, cancel)
 		defer stop()
+		ctx = context.WithValue(ctx, authorizationKey{}, &requestAuthorization{})
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, identityKey{}, id)))
 	})
 }

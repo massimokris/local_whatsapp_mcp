@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -111,6 +112,14 @@ func (s *Service) access(ctx context.Context, send bool) (engine.Policy, error) 
 	}
 	return s.cfg.Scope, nil
 }
+
+type authorizationKey struct{}
+type requestAuthorization struct {
+	once    sync.Once
+	allowed map[string]bool
+	err     error
+}
+
 func (s *Service) allowed(ctx context.Context, p engine.Policy, id string) bool {
 	if !validChat(id) {
 		return false
@@ -118,26 +127,46 @@ func (s *Service) allowed(ctx context.Context, p engine.Policy, id string) bool 
 	if p.Mode == "all" {
 		return true
 	}
-	allowed := map[string]bool{}
 	for _, selected := range p.ChatIDs {
-		allowed[selected] = true
-	}
-	if allowed[id] {
-		return true
-	}
-	// The engine resolves verified aliases in both directions; display names never grant access.
-	if s.opt.Engine != nil {
-		ids, err := s.opt.Engine.Resolve(ctx, id)
-		if err != nil {
-			return false
+		if selected == id {
+			return true
 		}
-		for _, alias := range ids {
-			if allowed[alias] {
-				return true
+	}
+	if len(p.ChatIDs) == 0 {
+		return false
+	}
+	cache, _ := ctx.Value(authorizationKey{}).(*requestAuthorization)
+	if cache == nil {
+		cache = &requestAuthorization{}
+	}
+	cache.once.Do(func() {
+		cache.allowed = map[string]bool{}
+		for _, selected := range p.ChatIDs {
+			cache.allowed[selected] = true
+		}
+		if s.opt.Engine == nil {
+			return
+		}
+		var aliases []string
+		if batch, ok := s.opt.Engine.(interface {
+			ResolveMany(context.Context, []string) ([]string, error)
+		}); ok {
+			aliases, cache.err = batch.ResolveMany(ctx, p.ChatIDs)
+		} else {
+			for _, selected := range p.ChatIDs {
+				var ids []string
+				ids, cache.err = s.opt.Engine.Resolve(ctx, selected)
+				if cache.err != nil {
+					return
+				}
+				aliases = append(aliases, ids...)
 			}
 		}
-	}
-	return false
+		for _, alias := range aliases {
+			cache.allowed[alias] = true
+		}
+	})
+	return cache.err == nil && cache.allowed[id]
 }
 
 func (s *Service) finish(ctx context.Context, p engine.Policy) error {
@@ -287,6 +316,9 @@ func (s *Service) readMessages(ctx context.Context, q Query, search bool) (any, 
 	}
 	if s.opt.Engine == nil {
 		return nil, errors.New("archive is not connected")
+	}
+	if !search && (q.HasMedia || q.MediaType != "") {
+		return nil, errors.New("media filters belong to search_messages; read_messages supports conversation, sender, and time filters")
 	}
 	if len(q.Query) > 2048 {
 		return nil, errors.New("query is too long")
