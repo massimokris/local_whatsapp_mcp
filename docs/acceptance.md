@@ -16,7 +16,7 @@ Use [cloud setup](cloud-setup.md) only if you need a hosted agent. Mac sleep, lo
 
 ## Verified without a personal account
 
-The [build instructions](building.md) provide repeatable commands. These checks use synthetic accounts, messages, media, provider commands, and OAuth clients; they do not establish live WhatsApp or provider compatibility.
+The [build instructions](building.md) provide repeatable commands. The final packaged smoke run passed 29 checks, and a separate isolated network check obtained a fresh WhatsApp QR while keeping the account unlinked and MCP access blocked. These checks use synthetic accounts, messages, media, provider commands, and OAuth clients; they do not establish live WhatsApp or provider compatibility.
 
 | Boundary | Evidence |
 | --- | --- |
@@ -37,7 +37,7 @@ The optional `python3 scripts/smoke-bundle.py` exercises the built service, real
 
 ## Live installation checks
 
-These checks remain for the user's account. No real message was read or sent during the build.
+QR generation has been verified. The following checks remain for the user's account. No real message was read or sent during the build.
 
 - **Link and capture:** scan the QR, observe catalog/history arriving, interrupt setup and reopen, then confirm that agent access remains unavailable until scope is saved. Available history may be partial.
 - **Scope:** select a test conversation, ask an agent to find/read it, and verify that another conversation is absent. Remove the selected chat and repeat reading and cached-attachment access. Add a new group and compare All chats with Selected chats.

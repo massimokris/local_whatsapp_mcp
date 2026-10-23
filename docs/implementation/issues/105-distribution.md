@@ -1,7 +1,7 @@
 # Distribution and acceptance
 
 - ID: `LW-105`
-- Status: open
+- Status: closed
 - Labels: `wayfinder:task`
 - Mode: AFK
 - Parent: [Implementation plan](../plan.md)

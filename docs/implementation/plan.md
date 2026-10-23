@@ -1,6 +1,6 @@
 # LocalWhatsAppMCP implementation
 
-- Status: in progress
+- Status: complete — app ready for local installation and account testing
 - Integration branch: `codex/localwhatsappmcp-integration`
 - Contract: [SPEC.md](../../SPEC.md)
 - Tracker operations: [local Markdown tracker](../agents/issue-tracker.md)
@@ -24,4 +24,8 @@ The specification and this unattended implementation request authorize these beh
 
 ## Integration contracts
 
-See [interfaces.md](interfaces.md) before implementing inter-component calls. Implementers own separate managed worktrees, branch from the integration tip, and merge its current tip before reporting completion. A merger integrates finished branches. The final review applies the code-review skill to the full branch.
+See [interfaces.md](interfaces.md) before implementing inter-component calls. Implementers own separate Git worktrees, branch from the integration tip, and merge its current tip before reporting completion. A merger integrates finished branches. The final review applies the code-review skill to the full branch.
+
+## Completion
+
+All six execution tasks are closed. The [distribution resolution](comments/105-distribution.md#completed--2026-10-23) records the final source snapshot, installer checksums, passing checks, review repairs, and worktree cleanup. The [installation guide](../acceptance.md) identifies the remaining account-bound tests without claiming they have run.

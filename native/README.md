@@ -21,7 +21,9 @@ Preview pages are `home`, `qr`, `initial`, `chats`, `agents`, `pairing`, `cloud`
 
 ## Verification recorded 2026-10-23
 
-Six public seam tests pass: search-scoped selection across 100 off-screen matches; preservation of other selections; contact/diacritic/normalized phone search; one owned service with graceful shutdown; rejection of requests after shutdown; fail-closed defaults for incomplete state; and strict native callback parsing. Some test methods cover multiple assertions at one seam.
+The initial six public seam tests covered: search-scoped selection across 100 off-screen matches; preservation of other selections; contact/diacritic/normalized phone search; one owned service with graceful shutdown; rejection of requests after shutdown; fail-closed defaults for incomplete state; and strict native callback parsing. Some test methods cover multiple assertions at one seam.
+
+After review repairs, all ten native tests pass. Added coverage verifies canonical selection after identity migration, abrupt owner death, and bounded startup-error recovery. The final packaged demo launch and capture also passed.
 
 Native renders were inspected for light chat selection, light initial-scope onboarding, dark QR, dark agents, light pairing, light cloud status, and dark settings. The demo QR round-tripped from its native PNG through macOS Vision's QR decoder. The demo capture runs exited successfully through the app Quit path. Layout uses the reference palette, 12 pt monospaced text, aligned rows, hairlines, and right-side chat checkboxes. Native controls provide keyboard focus and accessible labels.
 
