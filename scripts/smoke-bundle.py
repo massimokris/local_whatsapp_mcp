@@ -172,22 +172,40 @@ try:
     check(process.returncode == 0 and not (data / 'control.sock').exists(), 'owner pipe closure stops the service and removes control socket')
     process = None
 finally:
+    cleanup_errors = []
     for child in (bridge, process):
         if child is not None and child.poll() is None:
-            child.terminate()
             try:
+                child.terminate()
                 child.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait(timeout=5)
+            except ProcessLookupError:
+                pass
     # Include credentials saved before a failed setup returned its connection ID.
     for record in (data / 'connections').glob('*.json'):
         connection_ids.add(record.stem)
+    settings = data / 'settings.json'
+    if settings.exists():
+        try:
+            connection_ids.update(json.loads(settings.read_text())['grants'])
+        except (OSError, ValueError, KeyError):
+            cleanup_errors.append('temporary grant identifiers could not be recovered')
     items = [('com.localwhatsappmcp.cursor', hashlib.sha256(str(data).encode()).hexdigest())]
     items.extend(('com.localwhatsappmcp.agent', item) for item in connection_ids)
     for service, account in items:
-        subprocess.run(['/usr/bin/security', 'delete-generic-password', '-s', service, '-a', account],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        try:
+            deletion = subprocess.run(['/usr/bin/security', 'delete-generic-password', '-s', service, '-a', account],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            # security maps errSecItemNotFound (-25300) to exit status 44.
+            if deletion.returncode not in (0, 44):
+                cleanup_errors.append(service + ' / ' + account)
+        except (OSError, subprocess.TimeoutExpired):
+            cleanup_errors.append(service + ' / ' + account)
+    if cleanup_errors:
+        raise RuntimeError('Temporary Keychain cleanup incomplete: ' + '; '.join(cleanup_errors) +
+                           '. Recovery metadata retained at ' + str(data))
     shutil.rmtree(data)
 
 print('Bundle smoke passed: ' + str(len(checks)) + ' checks; temporary data and Keychain items removed.')
