@@ -1,0 +1,21 @@
+# macOS and developer-specific state
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# Native/Go build and distribution output
+.build/
+.swiftpm/
+/build/
+/dist/
+
+# Local environment and runtime data
+.env
+.env.*
+!.env.example
+/runtime/
+/session.db
+/session.db-*
+/wacli.db
+/wacli.db-*
+/media/
