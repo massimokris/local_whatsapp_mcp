@@ -85,7 +85,7 @@ func New(host Host, secrets Secrets) (*Extension, error) {
 		defer e.operations.Unlock()
 		if ctx.Err() == nil {
 			e.mu.Lock()
-			enabled := e.cfg.Enabled
+			enabled := e.cfg.Enabled && e.oauth == nil
 			e.mu.Unlock()
 			if enabled {
 				if err := e.start(); err != nil {
