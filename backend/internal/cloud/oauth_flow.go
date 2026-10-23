@@ -96,7 +96,7 @@ func (o *OAuth) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	owner := fingerprint(cookie.Value)
 	session, ok := o.sessions[owner]
-	if !ok || time.Now().After(session.Expires) || !o.opt.GrantActive(session.Grant) {
+	if !ok || o.now().After(session.Expires) || !o.opt.GrantActive(session.Grant) {
 		http.Error(w, "Cloud setup expired. Run the setup helper again.", 403)
 		return
 	}
@@ -122,7 +122,7 @@ func (o *OAuth) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, csrf := opaque(), opaque()
-	o.requests[id] = consentRequest{Owner: owner, CSRF: fingerprint(csrf), Params: q, Expires: time.Now().Add(5 * time.Minute)}
+	o.requests[id] = consentRequest{Owner: owner, CSRF: fingerprint(csrf), Params: q, Expires: o.now().Add(5 * time.Minute)}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = consentTemplate.Execute(w, map[string]string{"Name": c.Name, "Client": c.ID, "Redirect": q.Get("redirect_uri"), "Request": id, "CSRF": csrf})
 }
@@ -147,7 +147,7 @@ func (o *OAuth) consent(w http.ResponseWriter, r *http.Request) {
 	request, ok := o.requests[id]
 	owner := fingerprint(cookie.Value)
 	session, sok := o.sessions[owner]
-	if !ok || !sok || request.Owner != owner || time.Now().After(request.Expires) || time.Now().After(session.Expires) || subtle.ConstantTimeCompare([]byte(request.CSRF), []byte(fingerprint(r.PostForm.Get("csrf")))) != 1 || !o.opt.GrantActive(session.Grant) {
+	if !ok || !sok || request.Owner != owner || o.now().After(request.Expires) || o.now().After(session.Expires) || subtle.ConstantTimeCompare([]byte(request.CSRF), []byte(fingerprint(r.PostForm.Get("csrf")))) != 1 || !o.opt.GrantActive(session.Grant) {
 		http.Error(w, "invalid or expired consent", 403)
 		return
 	}

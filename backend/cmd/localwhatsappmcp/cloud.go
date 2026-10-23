@@ -87,8 +87,27 @@ The final browser Connect step must use the browser opened by the helper.`)
 	if command != "setup" {
 		return errors.New("unknown cloud command; use cloud --help")
 	}
-	if !*tokenStdin || *hostname == "" {
-		return errors.New("cloud setup requires --hostname and --token-stdin")
+	if !*tokenStdin {
+		return errors.New("cloud setup requires --token-stdin")
+	}
+	var existing cloud.TunnelConfig
+	if previous, readErr := setup.Control(ctx, *dir, "GET", "/cloud/config", nil); readErr == nil {
+		_ = json.Unmarshal(previous, &existing)
+	}
+	reuse := existing.Provider == *provider && existing.CredentialRef != "" && (*hostname == "" || *hostname == existing.Hostname)
+	if reuse {
+		if *hostname == "" {
+			*hostname = existing.Hostname
+		}
+		if *executable == "" {
+			*executable = existing.Executable
+		}
+		if *tunnelID == "" {
+			*tunnelID = existing.TunnelID
+		}
+	}
+	if *hostname == "" {
+		return errors.New("first cloud setup requires the account's stable --hostname")
 	}
 	if *provider != "ngrok" && *provider != "cloudflared" {
 		return errors.New("choose ngrok or cloudflared")
@@ -119,7 +138,9 @@ The final browser Connect step must use the browser opened by the helper.`)
 		}
 	}
 	var credential string
-	if *provider == "ngrok" {
+	if reuse && *ngrokConfig == "" && *credentialFile == "" {
+		// Reuse the app-owned Keychain reference without exposing it to this helper output.
+	} else if *provider == "ngrok" {
 		credential, err = importNgrokCredential(*ngrokConfig)
 	} else {
 		if *credentialFile == "" {

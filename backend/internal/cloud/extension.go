@@ -18,6 +18,7 @@ type Host interface {
 	DataDir() string
 	LocalURL() string
 	HelperPath() string
+	State() map[string]any
 	SetPublicURL(string)
 	CreateCloudGrant(name, client string) (string, error)
 	VerifyCloudGrant(id string) bool
@@ -169,6 +170,11 @@ func (e *Extension) control(w http.ResponseWriter, r *http.Request) {
 	defer e.operations.Unlock()
 	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 	switch {
+	case r.Method == "GET" && r.URL.Path == "/cloud/config":
+		e.mu.Lock()
+		cfg := e.cfg
+		e.mu.Unlock()
+		writeJSON(w, 200, cfg)
 	case r.Method == "POST" && r.URL.Path == "/cloud/instructions":
 		var in struct{ Provider, Name string }
 		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Provider != "ngrok" && in.Provider != "cloudflared" {
@@ -201,7 +207,7 @@ func (e *Extension) control(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		writeJSON(w, 200, e.State())
+		writeJSON(w, 200, e.host.State())
 	case r.Method == "GET" && r.URL.Path == "/cloud/verify":
 		e.mu.Lock()
 		host := e.cfg.Hostname
@@ -230,7 +236,7 @@ func (e *Extension) control(w http.ResponseWriter, r *http.Request) {
 		e.mu.Unlock()
 		e.supervisor.Stop()
 		e.host.SetPublicURL("")
-		writeJSON(w, 200, e.State())
+		writeJSON(w, 200, e.host.State())
 	default:
 		http.NotFound(w, r)
 	}

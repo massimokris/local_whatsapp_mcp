@@ -22,6 +22,7 @@ type OAuthOptions struct {
 	Issuer      string
 	Path        string
 	GrantActive func(string) bool
+	Now         func() time.Time
 }
 type ownerSession struct {
 	Grant     string
@@ -81,7 +82,7 @@ func (o *OAuth) Prepare(grant, client string, redirects []string) (string, error
 		}
 	}
 	token := opaque()
-	o.handoffs[fingerprint(token)] = ownerSession{grant, client, append([]string(nil), redirects...), time.Now().Add(10 * time.Minute)}
+	o.handoffs[fingerprint(token)] = ownerSession{grant, client, append([]string(nil), redirects...), o.now().Add(10 * time.Minute)}
 	return token, nil
 }
 func (o *OAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +137,7 @@ func (o *OAuth) bootstrap(w http.ResponseWriter, r *http.Request) {
 	k := fingerprint(r.PostForm.Get("handoff"))
 	s, ok := o.handoffs[k]
 	delete(o.handoffs, k)
-	if !ok || time.Now().After(s.Expires) || !o.opt.GrantActive(s.Grant) {
+	if !ok || o.now().After(s.Expires) || !o.opt.GrantActive(s.Grant) {
 		http.Error(w, "This private setup handoff has expired or was already used.", 403)
 		return
 	}
@@ -197,7 +198,7 @@ func contains(a []string, s string) bool {
 func cleanOrigin(s string) string { return strings.TrimRight(s, "/") }
 
 func (o *OAuth) prune() {
-	now := time.Now()
+	now := o.now()
 	for k, v := range o.handoffs {
 		if now.After(v.Expires) {
 			delete(o.handoffs, k)
@@ -213,4 +214,11 @@ func (o *OAuth) prune() {
 			delete(o.requests, k)
 		}
 	}
+}
+
+func (o *OAuth) now() time.Time {
+	if o.opt.Now != nil {
+		return o.opt.Now()
+	}
+	return time.Now()
 }

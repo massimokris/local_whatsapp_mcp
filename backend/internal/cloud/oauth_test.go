@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOwnerHandoffIsSingleUseAndBoundToExpectedClient(t *testing.T) {
@@ -170,5 +171,25 @@ func TestOAuthPKCEFlowPersistsHashedCredentialsAndRevokesImmediately(t *testing.
 	active = false
 	if _, err = o.Verify(context.Background(), rotated["access_token"].(string)); err == nil {
 		t.Fatal("revoked grant accepted")
+	}
+}
+
+func TestExpiredOwnerHandoffNeverCreatesBrowserSession(t *testing.T) {
+	now := time.Now()
+	o, err := NewOAuth(OAuthOptions{Issuer: "https://bridge.example", Path: t.TempDir() + "/oauth.json", GrantActive: func(string) bool { return true }, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := o.Prepare("agent-a", "client-a", []string{"https://client.example/callback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(11 * time.Minute)
+	r := httptest.NewRequest("POST", "https://bridge.example/oauth/bootstrap", strings.NewReader(url.Values{"handoff": {handoff}}.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	o.ServeHTTP(w, r)
+	if w.Code != 403 || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("expired handoff: %d", w.Code)
 	}
 }
