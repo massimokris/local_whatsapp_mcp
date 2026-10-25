@@ -6,7 +6,7 @@ A native macOS menu bar app that connects your WhatsApp to your preferred local 
 
 ## Install and connect
 
-Open `dist/LocalWhatsAppMCP-0.1.30-arm64.dmg`, drag the app to Applications, and launch it. An unlinked account opens directly to the QR connection page:
+Open the DMG produced under `dist/`, drag the app to Applications, and launch it. Quit an existing copy before replacing it; your application data is retained. An unlinked account opens directly to the QR connection page:
 
 1. Connect WhatsApp by scanning the QR code from WhatsApp’s Linked Devices screen.
 2. **Choose chats** opens automatically after linking. Save your selection, or continue with all chats, to choose what is retained and available to agents.
@@ -15,7 +15,7 @@ Open `dist/LocalWhatsAppMCP-0.1.30-arm64.dmg`, drag the app to Applications, and
 
 The MCP server starts automatically and is available only on this Mac, through loopback HTTP. Each pairing code expires after ten minutes and can create one connection with its own revocable credential; sending starts disabled. The agent handles its client's configuration and reload. There is no public endpoint, tunnel setup, or browser login.
 
-The bundled client setup, credential-header, diagnostic, and stdio bridge commands have been removed. Existing bearer grants remain valid, but clients configured to call those commands must be reconfigured using the new instructions. The app does not edit your client configuration. The `localwhatsappmcp` executable remains in the bundle to run the service and native app's private control commands.
+Clients configured by older releases to invoke a bundled helper need [agent-managed reconfiguration](docs/acceptance.md#recovery).
 
 The panel can close while sync and MCP access continue. Quit stops the app-owned processes. The app honors Mac sleep; local access depends on the Mac being awake and the app running. Launch at login uses native macOS registration and may require OS approval. WhatsApp controls how much history is available; attachments download on demand. Your agent handles reasoning, schedules, and notifications.
 

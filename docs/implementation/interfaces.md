@@ -14,6 +14,8 @@ These are internal engineering contracts for concurrent implementation. Product 
 
 Native app launches `localwhatsappmcp serve --owner-stdin --data-dir DIR --wacli PATH`. The app keeps stdin open as an ownership pipe; EOF cancels the service and awaits owned children, including after an app crash. SIGTERM also waits for owned child shutdown. Service stderr emits only a bounded, allowlisted `startup_error` code for startup failure; native UI maps it to recovery copy. It never displays arbitrary process logs. Private app calls use `localwhatsappmcp control --data-dir DIR --method METHOD --path PATH`; JSON request body comes from stdin; one JSON response goes to stdout; nonzero status indicates failure. Blocking process work stays off the main actor.
 
+The service takes an exclusive `service.lock` in its data directory. Before publishing policy after a crash, startup also waits for the upstream writer lock; a stale lock file alone does not prove a writer is running. Only wacli writes its message/session databases; the service's direct SQL reads supply catalog metadata and persisted sync freshness.
+
 Private endpoints:
 
 | Method/path | Request | Response |
@@ -67,6 +69,8 @@ The service binds Streamable HTTP to an explicit loopback IP address, `127.0.0.1
 The exchange authenticates possession of the random pairing code; no existing access token is required. Codes expire after ten minutes and are consumed once while creating a named connection with sending disabled. The returned URL includes `/mcp` and the service's actual address. Send the code in the JSON body, never in the URL. The body is limited to 4096 bytes and must contain exactly one non-empty string field, `token`; duplicate keys, unknown fields, and trailing JSON fail. Credential responses are non-cacheable. The agent saves the returned token privately, configures its own client, and verifies `check_status`; the service does not know or modify client configuration. A consumed invitation is not a recovery credential: if its successful response is lost, create a new invitation and remove the unused connection as needed.
 
 Manual UI setup still creates a grant through private control and lets the user copy its URL and bearer token directly into a Streamable HTTP client. Both paths use the same grant authentication and revocation. Every MCP request rechecks current scope, credential revocation, and sending permission. Invitation creation and redemption require confirmed scope; content remains unavailable while scope is unconfirmed.
+
+Send tools require a caller-generated `request_id`. The service durably records an uncertain outcome before dispatch and never dispatches the same agent/request identifier again. An unchanged retry returns its saved outcome; different content with that identifier is rejected. A transport error is not proof that nothing was sent: inspect the conversation before deciding whether to send again. Accepted sends are distinct from observed delivery/read state.
 
 The client-specific installer and `setup`, `headers`, `doctor`, and `stdio` commands are removed. The bundled executable retains `serve` and `control` for the native app. Existing bearer grants retain their identity and permissions; clients referencing removed commands must be reconfigured by their agent. The app does not rewrite those files. Setup uses generic copyable instructions and an inline manual option; saved connections expose credentials and permission management in expandable cards.
 

@@ -1,6 +1,6 @@
 # Service implementation and verification
 
-2026-10-23: Integrated service implementation `f3b6875` and boundary corrections `dbeb1ae` through `36dd82a`. [Service documentation](../../../backend/README.md) records private Unix control, authenticated Streamable HTTP, Keychain helper installation, stdio bridging, scope transition acknowledgement, and durable send identifiers.
+2026-10-23: Integrated service implementation `f3b6875` and boundary corrections `dbeb1ae` through `36dd82a`: private Unix control, authenticated Streamable HTTP, Keychain helper installation, stdio bridging, scope transition acknowledgement, and durable send identifiers. The helper/Keychain/stdio design is historical; current contracts are in [component interfaces](../interfaces.md), with targeted commands in [Backend development](../../building.md#backend-development).
 
 Backend race tests and vet passed. Deterministic handler fixtures exercise initial access denial, pairing replay, separate revocable agents, sending opt-in, duplicate-send prevention, restart after failed policy transition, scoped update checkpoints, cached file denial after removal, and multi-chunk attachment retrieval. The actual pinned engine was exercised through its adapter with a synthetic archive.
 

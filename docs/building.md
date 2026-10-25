@@ -61,18 +61,30 @@ invalid app/helper signatures. Its tests compile real disposable Mach-O
 fixtures. Build outputs and prepared engine sources are ignored by Git. The
 packaging scripts never open WhatsApp stores or copy runtime account data.
 
+## Backend development
+
+For focused service builds and checks, run from `backend/`:
+
+```sh
+mkdir -p ../build
+go build -o ../build/localwhatsappmcp ./cmd/localwhatsappmcp
+go test -tags sqlite_fts5 -race ./...
+go vet ./...
+WACLI_TEST_BINARY=/absolute/path/to/built/wacli go test -tags sqlite_fts5 ./internal/engine
+```
+
+The optional `WACLI_TEST_BINARY` check exercises the actual pinned engine against
+an isolated synthetic archive. It does not link WhatsApp. Other service tests
+use deterministic fixtures at the JSON/events boundary. See
+[component interfaces](implementation/interfaces.md) for service ownership,
+private control, MCP, and policy contracts, and [acceptance](acceptance.md) for
+executed checks and live-account limits.
+
 ## Local installation
 
-For reinstall testing, quit the running LocalWhatsAppMCP app, open
-`dist/LocalWhatsAppMCP-0.1.30-arm64.dmg`, and drag the app to Applications,
-replacing the existing copy. Alternatively, copy the complete `.app` from
-`dist/`. Open the Applications copy and use its menu bar icon. A fresh
-installation asks you to connect WhatsApp and choose shared chat scope; the
-local MCP service starts automatically.
-Open **Local MCP** to create setup instructions, manage sending permission, or
-remove an agent’s access. Account state lives in
-`~/Library/Application Support/LocalWhatsAppMCP/` and survives app replacement.
-Keep that data directory when reinstalling.
+Follow [Install and first use](acceptance.md#install-and-first-use) for installation,
+onboarding, and account-data preservation. Use the DMG or the complete `.app`
+produced under `dist/` for your target architecture.
 
 The default build uses ad-hoc signing, so it is locally installable but is not
 an Apple-notarized public release. A downloaded copy can trigger Gatekeeper;
@@ -86,9 +98,8 @@ checks the bundled service, local SQLite credential database, HTTP pairing excha
 disposable data. It removes its temporary data directory on exit and requires no
 Keychain access.
 
-Clients configured by older releases to invoke `headers` or `stdio` must be
-reconfigured by their agent with the new setup instructions. Existing bearer
-grants are retained, and the app does not rewrite client configuration files.
+For older helper-based client configurations or storage failures, see
+[Recovery](acceptance.md#recovery).
 
 ## Release signing and notarization
 
