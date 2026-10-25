@@ -104,9 +104,7 @@ struct PanelView: View {
                     primary("Reconnect WhatsApp", action: model.showConnection)
                 } else if model.whatsappReady {
                     if !model.state.scope.isConfirmed {
-                        primary("Continue with all chats") { model.saveScope(all: true) }
-                        Button("Select specific chats", action: model.editChats)
-                            .buttonStyle(.plain).foregroundStyle(Theme.secondary).padding(.top, 13)
+                        primary("Choose chats", action: model.editChats)
                     }
                 } else {
                     primary(model.state.whatsapp.qr == nil ? "Connect WhatsApp" : "Continue connecting", action: model.showConnection)

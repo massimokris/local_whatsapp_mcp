@@ -11,6 +11,7 @@ final class AppModel: ObservableObject {
         didSet {
             pendingPanelOpen = false
             if oldValue != page {
+                navigationRevision += 1
                 clearInvitation()
                 clearConnectionCredentials()
                 showingManualSetup = false
@@ -47,6 +48,7 @@ final class AppModel: ObservableObject {
     private var stateRevision = 0
     private var stopping = false
     private var didLoad = false
+    private var navigationRevision = 0
     private var pendingPanelOpen = false
     private var seedAllSelection = false
     private var lastCatalogRefresh = Date.distantPast
@@ -56,12 +58,12 @@ final class AppModel: ObservableObject {
     private var setupManualConnectionID: String?
     private var setupGeneration = 0
 
-    init(environment: [String: String] = ProcessInfo.processInfo.environment, pasteboard: NSPasteboard = .general) {
+    init(environment: [String: String] = ProcessInfo.processInfo.environment, pasteboard: NSPasteboard = .general, runtime: HelperRuntime? = nil) {
         self.pasteboard = pasteboard
         isDemo = CommandLine.arguments.contains("--demo") || environment["LWMCP_DEMO"] == "1"
         let helpers = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers")
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        runtime = HelperRuntime(helper: helpers.appendingPathComponent("localwhatsappmcp"), wacli: helpers.appendingPathComponent("wacli"), dataDirectory: applicationSupport.appendingPathComponent("LocalWhatsAppMCP"))
+        self.runtime = runtime ?? HelperRuntime(helper: helpers.appendingPathComponent("localwhatsappmcp"), wacli: helpers.appendingPathComponent("wacli"), dataDirectory: applicationSupport.appendingPathComponent("LocalWhatsAppMCP"))
         if isDemo { loadDemo(page: environment["LWMCP_DEMO_PAGE"]) }
     }
     var whatsappReady: Bool {
@@ -153,11 +155,12 @@ final class AppModel: ObservableObject {
             guard refreshRevision == stateRevision else { return }
             receivedState = true
             serviceAvailable = true
+            let resumeInitialSetup = !didLoad && navigationRevision == 0
             state = latest
             reconcileConnections()
             if !didLoad { selection.selectedIDs = Set(latest.scope.chatIDs); didLoad = true }
             if error?.hasPrefix("Connecting to WhatsApp.") == true { error = nil }
-            resolvePanelOpening()
+            resolvePanelOpening(resumeInitialSetup: resumeInitialSetup)
             if page == .chats || (whatsappReady && Date().timeIntervalSince(lastCatalogRefresh) > 15) {
                 let catalog = try await runtime.control(method: "GET", path: "/catalog")
                 guard refreshRevision == stateRevision else { return }
@@ -188,7 +191,7 @@ final class AppModel: ObservableObject {
         }
         if let id = expandedAgentID, !activeIDs.contains(id) { expandedAgentID = nil }
     }
-    private func resolvePanelOpening() {
+    private func resolvePanelOpening(resumeInitialSetup: Bool = false) {
         let destination = whatsappDisconnecting && (pendingPanelOpen || page == .qr)
             ? WhatsAppPanelOpening.home
             : WhatsAppPanelOpening(state: state.whatsapp, currentPageIsQR: page == .qr, foregroundOpen: pendingPanelOpen)
@@ -196,12 +199,20 @@ final class AppModel: ObservableObject {
         if destination == .qr(startConnection: true), busy { return }
         pendingPanelOpen = false
         switch destination {
-        case .keepCurrentPage: break
-        case .home: page = .home
+        case .keepCurrentPage:
+            // Resume unfinished chat selection once on launch. Later polls and
+            // window reopens must respect an explicit exit or another page.
+            if resumeInitialSetup, page == .home, needsInitialChatSelection { editChats() }
+        case .home:
+            if page == .qr, needsInitialChatSelection { editChats() }
+            else { page = .home }
         case .qr(let startConnection):
             page = .qr
             if startConnection { connectWhatsApp() }
         }
+    }
+    private var needsInitialChatSelection: Bool {
+        whatsappReady && !state.scope.isConfirmed && !whatsappDisconnectPending && !whatsappDisconnecting
     }
     func showConnection() {
         page = .qr
@@ -235,12 +246,22 @@ final class AppModel: ObservableObject {
         Task { await refresh() }
     }
     func saveScope(all: Bool) {
+        guard !busy else { return }
+        let initialConfirmation = !state.scope.isConfirmed
+        let navigation = navigationRevision
+        let continueSetup = {
+            // Saving may finish after the user leaves, including leaving and
+            // reopening the selector. Persist scope without replacing that route.
+            guard !self.stopping, self.navigationRevision == navigation, self.state.scope.isConfirmed else { return }
+            self.page = initialConfirmation ? .mcp : .home
+        }
         if isDemo {
             state.scope = Scope(mode: all ? "all" : "selected", chatIDs: all ? [] : selection.selectedIDs.sorted())
-            page = .home
+            if state.mcp.status == "setup_required" { state.mcp.status = "ready" }
+            continueSetup()
             return
         }
-        mutate(method: "PUT", path: "/scope", body: ["mode": all ? "all" : "selected", "chat_ids": all ? [] : selection.selectedIDs.sorted()], completion: { self.page = .home })
+        mutate(method: "PUT", path: "/scope", body: ["mode": all ? "all" : "selected", "chat_ids": all ? [] : selection.selectedIDs.sorted()], completion: continueSetup)
     }
     func wake() {
         guard !isDemo, !stopping else { return }

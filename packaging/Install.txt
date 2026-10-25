@@ -1,9 +1,10 @@
 LocalWhatsAppMCP
 
-1. Drag LocalWhatsAppMCP.app to Applications.
+1. Quit any running copy, then drag LocalWhatsAppMCP.app to Applications and replace the existing app if prompted.
 2. Open the app. Its menu bar icon opens the control panel.
-3. Choose Connect WhatsApp, then scan its QR from WhatsApp's Linked devices.
-4. Confirm All chats or choose specific chats, then connect an agent.
+3. The app opens the QR connection page when unlinked. Scan its QR from WhatsApp's Linked devices.
+4. Choose chats and save your selection, or continue with all chats.
+5. Agent setup opens automatically. Connect an agent using Copy instructions or Do it manually.
 
 This local development build is ad-hoc signed. It is not Apple notarized.
 If macOS blocks the copy, use Privacy & Security to allow this app only after
@@ -18,5 +19,6 @@ The archive and account state remain under:
 ~/Library/Application Support/LocalWhatsAppMCP/
 
 Replacing the app does not delete that data. WhatsApp controls which history it
-provides. Live account, agent-client, and optional tunnel setup are completed
-on your Mac. The app does not keep a sleeping Mac awake.
+provides. WhatsApp linking and agent setup are completed on your Mac.
+The MCP server is available only on this Mac. The app does not keep a sleeping
+Mac awake.
