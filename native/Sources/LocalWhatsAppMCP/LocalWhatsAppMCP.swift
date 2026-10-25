@@ -9,7 +9,7 @@ struct LocalWhatsAppMCPApp: App {
         Settings { EmptyView() }
             .commands {
                 CommandGroup(replacing: .appSettings) {
-                    Button("Settings…") { delegate.model.page = .settings; delegate.showPanel() }.keyboardShortcut(",")
+                    Button("Settings…") { delegate.model.page = .settings; delegate.showPanel(prepareConnection: false) }.keyboardShortcut(",")
                 }
                 CommandGroup(replacing: .newItem) {
                     Button("Show LocalWhatsAppMCP") { delegate.showPanel() }.keyboardShortcut("1")
@@ -19,21 +19,16 @@ struct LocalWhatsAppMCPApp: App {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = AppModel()
     private var statusItem: NSStatusItem?
     private var panel: MenuPanel?
     private var subscriptions = Set<AnyCancellable>()
-    private var outsideMonitor: Any?
-    private var localMonitor: Any?
     private var wakeObserver: NSObjectProtocol?
     private var terminating = false
     private var servicesStopped = false
     private var captured = false
 
-    func applicationWillFinishLaunching(_ notification: Notification) {
-        NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURL(_:withReplyEvent:)), forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
-    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -44,20 +39,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.action = #selector(togglePanel(_:))
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         item.button?.setAccessibilityLabel("LocalWhatsAppMCP")
-        let panel = MenuPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 664), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let panel = MenuPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 750), styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
         panel.title = "LocalWhatsAppMCP"
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.toolbarStyle = .unified
+        panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
+        panel.backgroundColor = NSColor(Theme.background)
+        panel.isOpaque = true
         panel.hasShadow = true
-        panel.level = .popUpMenu
+        panel.isFloatingPanel = false
+        panel.level = .normal
         panel.hidesOnDeactivate = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.onCancel = { [weak self] in self?.closePanel() }
+        panel.collectionBehavior = [.managed]
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.delegate = self
         self.panel = panel
-        model.$appearance.sink { [weak self] _ in
-            DispatchQueue.main.async { [weak self] in self?.panel?.appearance = self?.model.nativeAppearance }
-        }.store(in: &subscriptions)
         model.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -73,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showPanel(); return false }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { closePanel(); return false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if servicesStopped { return .terminateNow }
         guard !terminating else { return .terminateCancel }
@@ -86,67 +85,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return .terminateCancel
     }
-    @objc private func handleURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
-        guard let value = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, let url = URL(string: value) else { return }
-        model.authorize(url)
-    }
     @objc private func togglePanel(_ sender: NSStatusBarButton) {
         if NSApp.currentEvent?.type == .rightMouseUp {
-            closePanel()
             let menu = NSMenu()
             let open = menu.addItem(withTitle: "Open LocalWhatsAppMCP", action: #selector(openFromMenu), keyEquivalent: "")
             open.target = self
             menu.addItem(.separator())
             menu.addItem(withTitle: "Quit LocalWhatsAppMCP", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
             statusItem?.menu = menu; sender.performClick(nil); statusItem?.menu = nil
-        } else if panel?.isVisible == true { closePanel() } else { showPanel() }
+        } else { showPanel() }
     }
     @objc private func openFromMenu() { showPanel() }
-    func showPanel() {
+    func showPanel(prepareConnection: Bool = true) {
         guard let panel else { return }
+        if panel.isVisible && !panel.isMiniaturized {
+            panel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        if prepareConnection { model.panelOpened() }
         let screen = statusItem?.button?.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1000, height: 800)
         let anchor: NSRect
         if let button = statusItem?.button, let window = button.window { anchor = window.convertToScreen(button.convert(button.bounds, to: nil)) }
-        else { anchor = NSRect(x: screen.maxX - 230, y: screen.maxY, width: 20, height: 20) }
-        let width: CGFloat = 460
-        let height = min(664, screen.height - 20)
+        else { anchor = NSRect(x: screen.maxX - 210, y: screen.maxY, width: 20, height: 20) }
+        let width: CGFloat = min(420, screen.width - 16)
+        let height = min(750, screen.height - 16)
         let x = min(max(anchor.midX - width / 2, screen.minX + 8), screen.maxX - width - 8)
-        let pointer = min(max(anchor.midX - x, 16), width - 16)
-        panel.contentViewController = NSHostingController(rootView:
-            VStack(spacing: 0) {
-                Triangle().fill(Theme.background).frame(width: 16, height: 8).offset(x: pointer - width / 2)
-                PanelView(model: model, quit: { NSApp.terminate(nil) }, dismiss: { [weak self] in self?.closePanel() })
-            }.frame(width: width, height: height))
-        panel.appearance = model.nativeAppearance
-        panel.setFrame(NSRect(x: x, y: anchor.minY - height, width: width, height: height), display: true)
+        let y = max(screen.minY + 8, min(anchor.minY - height - 4, screen.maxY - height - 8))
+        let controller = NSHostingController(rootView:
+            PanelView(model: model, quit: { NSApp.terminate(nil) })
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea()
+                .preferredColorScheme(.dark))
+        // AppKit owns the outer frame. Propagating the hosting view's intrinsic
+        // size adds titlebar height a second time with full-size content views.
+        controller.sizingOptions = []
+        panel.contentViewController = controller
+        panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        if panel.isMiniaturized { panel.deminiaturize(nil) }
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        installMonitors()
         captureIfRequested()
     }
     private func closePanel() {
+        model.panelClosed()
         panel?.orderOut(nil)
-        if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
-        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
-        outsideMonitor = nil; localMonitor = nil
-    }
-    private func installMonitors() {
-        if outsideMonitor == nil {
-            outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in Task { @MainActor in self?.closePanel() } }
-        }
-        if localMonitor == nil {
-            localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-                guard let self else { return event }
-                if event.window !== self.panel && event.window !== self.statusItem?.button?.window { self.closePanel() }
-                return event
-            }
-        }
     }
     private func captureIfRequested() {
         guard model.isDemo, !captured, let path = ProcessInfo.processInfo.environment["LWMCP_CAPTURE_PATH"] else { return }
         captured = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-            guard let view = self?.panel?.contentView else { return }
+            guard let contentView = self?.panel?.contentView else { return }
+            // The enclosing AppKit frame includes the real native titlebar controls.
+            // Rendering that view keeps demo captures confined to this window.
+            let view = contentView.superview ?? contentView
             view.layoutSubtreeIfNeeded()
             guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
             view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -159,11 +151,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 private final class MenuPanel: NSPanel {
-    var onCancel: (() -> Void)?
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-    override func cancelOperation(_ sender: Any?) { onCancel?() }
-}
-private struct Triangle: Shape {
-    func path(in rect: CGRect) -> Path { Path { p in p.move(to: CGPoint(x: rect.midX, y: 0)); p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY)); p.addLine(to: CGPoint(x: 0, y: rect.maxY)); p.closeSubpath() } }
+    override var canBecomeMain: Bool { true }
 }

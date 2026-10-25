@@ -32,6 +32,7 @@ printf 'Building native app (%s, macOS %s)...\n' "$architecture" "$minimum"
 swift build --package-path "$root/native" -c release --arch "$architecture"
 native_bin=$(swift build --package-path "$root/native" -c release --arch "$architecture" --show-bin-path)
 cp "$native_bin/LocalWhatsAppMCP" "$app/Contents/MacOS/LocalWhatsAppMCP"
+ditto "$native_bin/LocalWhatsAppMCP_LocalWhatsAppMCP.bundle" "$app/Contents/Resources/LocalWhatsAppMCP_LocalWhatsAppMCP.bundle"
 printf 'Building local service...\n'
 (cd "$root/backend" && go build -trimpath -tags sqlite_fts5 -ldflags '-s -w' -o "$app/Contents/Helpers/localwhatsappmcp" ./cmd/localwhatsappmcp)
 printf 'Building pinned WhatsApp engine...\n'

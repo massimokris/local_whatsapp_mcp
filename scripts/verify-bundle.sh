@@ -8,8 +8,13 @@ done
 [ -f "$app/Contents/Info.plist" ] || fail 'Missing bundle metadata: Contents/Info.plist'
 /usr/bin/plutil -lint "$app/Contents/Info.plist" >/dev/null || fail 'Invalid bundle metadata'
 minimum=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")
-scheme=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$app/Contents/Info.plist" 2>/dev/null || true)
-[ "$scheme" = localwhatsappmcp ] || fail 'Missing localwhatsappmcp callback URL scheme'
+if /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$app/Contents/Info.plist" >/dev/null 2>&1; then
+  fail 'Local-only bundle must not register callback URL schemes'
+fi
+for resource in WhatsAppLogo.png AssetCredits.txt; do
+  relative="Contents/Resources/LocalWhatsAppMCP_LocalWhatsAppMCP.bundle/$resource"
+  [ -s "$app/$relative" ] || fail "Missing bundled resource: $relative"
+done
 architectures=$(xcrun lipo -archs "$app/Contents/MacOS/LocalWhatsAppMCP")
 for relative in Contents/MacOS/LocalWhatsAppMCP Contents/Helpers/localwhatsappmcp Contents/Helpers/wacli; do
   binary="$app/$relative"
@@ -26,6 +31,9 @@ for relative in Contents/MacOS/LocalWhatsAppMCP Contents/Helpers/localwhatsappmc
     case "$dependency" in /usr/lib/*|/System/Library/*|@rpath/libswift*.dylib) ;; *) fail "Non-system dynamic library dependency: $relative ($dependency)" ;; esac
   done
 done
+if xcrun nm -u "$app/Contents/Helpers/localwhatsappmcp" | grep -E '_SecItem(Add|CopyMatching|Update|Delete)$' >/dev/null; then
+  fail 'App helper must use local SQLite credentials, without Keychain access'
+fi
 /usr/bin/codesign --verify --deep --strict "$app" 2>/dev/null || fail 'Bundle signature verification failed'
 for helper in localwhatsappmcp wacli; do
   /usr/bin/codesign --verify --strict "$app/Contents/Helpers/$helper" 2>/dev/null || fail "Helper signature verification failed: $helper"

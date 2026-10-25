@@ -35,7 +35,7 @@ public actor HelperRuntime {
         }
         let process = Process()
         process.executableURL = helper
-        process.arguments = ["serve", "--owner-stdin", "--data-dir", dataDirectory.path, "--wacli", wacli.path, "--helper", helper.path]
+        process.arguments = ["serve", "--owner-stdin", "--data-dir", dataDirectory.path, "--wacli", wacli.path]
         process.standardOutput = FileHandle.nullDevice
         let capture = StartupDiagnostics(), errors = Pipe()
         errors.fileHandleForReading.readabilityHandler = { handle in
@@ -61,10 +61,12 @@ public actor HelperRuntime {
         guard let process = service else { return }
         if process.isRunning {
             process.terminate()
-            // The service waits for its engine and tunnel. Keep the UI responsive while it does so.
+            // The service waits for its engine. Keep the UI responsive while it does so.
             for _ in 0..<200 where process.isRunning { try? await Task.sleep(nanoseconds: 100_000_000) }
             if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            process.waitUntilExit()
+            // An actor can resume on another thread after suspension. Foundation's
+            // run-loop-based waitUntilExit can then stall even after the child exits.
+            while process.isRunning { try? await Task.sleep(nanoseconds: 100_000_000) }
         }
         service = nil
         diagnosticPipe?.fileHandleForReading.readabilityHandler = nil
@@ -73,19 +75,19 @@ public actor HelperRuntime {
     }
     public func control(method: String, path: String, body: Data? = nil) async throws -> Data {
         guard !stopping else { throw HelperFailure("The local service is stopping.") }
+        // A startup_error is terminal even while the process is still draining
+        // stderr or shutting down. Its safe recovery message must not be replaced
+        // by the control helper's generic connection error during that interval.
+        if let failure = diagnostics?.failure { throw failure }
         if service?.isRunning == false {
-            throw diagnostics?.failure ?? HelperFailure("The local service stopped. Reopen the app or wait for it to retry.")
+            throw HelperFailure("The local service stopped. Reopen the app or wait for it to retry.")
         }
         do {
             return try await Self.run(helper: helper, arguments: ["control", "--data-dir", dataDirectory.path, "--method", method, "--path", path], input: body)
         } catch {
-            if service?.isRunning == false, let failure = diagnostics?.failure { throw failure }
+            if let failure = diagnostics?.failure { throw failure }
             throw error
         }
-    }
-    public func authorizeCloud(request: String) async throws {
-        guard !stopping else { throw HelperFailure("The local service is stopping.") }
-        _ = try await Self.run(helper: helper, arguments: ["cloud-authorize", "--data-dir", dataDirectory.path, "--request", request], input: nil)
     }
     private static func run(helper: URL, arguments: [String], input: Data?) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
@@ -132,7 +134,7 @@ private final class StartupDiagnostics: @unchecked Sendable {
     private static let messages = [
         "configuration_missing": "Saved settings.json is missing. Restore it in the app’s Application Support folder before reopening this archive.",
         "configuration_invalid": "Saved settings.json is invalid. Restore a valid copy in the app’s Application Support folder and retry.",
-        "keychain_unavailable": "The app credential is unavailable in macOS Keychain. Unlock the login keychain and reopen the app; repair its saved credential if this continues.",
+        "credentials_unavailable": "The app’s credentials.db is missing or unavailable. Restore it in the app’s Application Support folder and reopen the app.",
         "port_in_use": "The local MCP port is in use. Quit the other LocalWhatsAppMCP service and retry.",
         "already_running": "Another LocalWhatsAppMCP service is still running. Quit that app instance and retry.",
         "writer_stopping": "The previous WhatsApp connection is still stopping. Wait briefly, then reopen the app.",

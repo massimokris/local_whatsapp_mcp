@@ -1,0 +1,3 @@
+WhatsAppLogo.png is the unchanged WhatsApp logo image supplied by the project
+owner on 2026-10-23 for the WhatsApp connection card. WhatsApp and its logo are
+trademarks of WhatsApp LLC. This app is an independent project.

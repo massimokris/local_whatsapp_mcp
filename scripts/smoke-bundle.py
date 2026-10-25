@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Exercise a bundled service/Keychain/MCP bridge without a WhatsApp account.
+"""Exercise bundled HTTP pairing, SQLite credentials, and MCP without a WhatsApp account.
 
-Uses a disposable project build directory and exact, temporary Keychain items.
-Never opens provider login, connects WhatsApp, or changes a real client config.
+Uses only a disposable project build directory; no Keychain access.
+Never connects WhatsApp or changes a real client config.
 """
-import hashlib
 import http.client
 import json
-import os
 from pathlib import Path
-import select
 import shutil
 import sqlite3
 import subprocess
@@ -25,8 +22,6 @@ engine = app / 'Contents/Helpers/wacli'
 (root / 'build').mkdir(exist_ok=True)
 data = Path(tempfile.mkdtemp(prefix='smoke.', dir=root / 'build'))
 process = None
-bridge = None
-connection_ids = set()
 checks = []
 
 
@@ -61,32 +56,47 @@ def status(url, path, host=None):
         client.close()
 
 
-def rpc(method, params, request_id):
-    payload = {'jsonrpc': '2.0', 'method': method, 'params': params}
-    if request_id is not None:
-        payload['id'] = request_id
-    bridge.stdin.write(json.dumps(payload).encode() + b'\n')
-    bridge.stdin.flush()
-    if request_id is None:
-        return None
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if not select.select([bridge.stdout], [], [], 0.2)[0]:
-            continue
-        line = bridge.stdout.readline()
-        if not line:
-            break
-        value = json.loads(line)
-        if value.get('id') == request_id:
-            if 'error' in value:
-                raise RuntimeError('MCP request failed: ' + method)
-            return value['result']
-    raise RuntimeError('MCP request timed out: ' + method)
+def direct_rpc(credentials, method, params, request_id):
+    parsed = urlparse(credentials['url'])
+    client = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=15)
+    try:
+        client.request('POST', parsed.path, json.dumps({'jsonrpc': '2.0', 'id': request_id,
+                        'method': method, 'params': params}), headers={
+                            'Authorization': 'Bearer ' + credentials['access_token'],
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json, text/event-stream',
+                            'MCP-Protocol-Version': '2025-11-25'})
+        response = client.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        client.close()
+
+
+def exchange(url, body, method='POST', headers=None):
+    parsed = urlparse(url)
+    client = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=15)
+    try:
+        request_headers = {'Content-Type': 'application/json'}
+        request_headers.update(headers or {})
+        client.request(method, parsed.path, json.dumps(body), headers=request_headers)
+        response = client.getresponse()
+        payload = response.read()
+        value = json.loads(payload) if response.getheader('Content-Type', '').startswith('application/json') else None
+        return response.status, value, response.getheader('Cache-Control', '')
+    finally:
+        client.close()
+
+
+def rpc(credentials, method, params, request_id):
+    code, value = direct_rpc(credentials, method, params, request_id)
+    if code != 200 or 'error' in value or 'result' not in value:
+        raise RuntimeError('MCP request failed: ' + method)
+    return value['result']
 
 
 try:
     process = subprocess.Popen([str(helper), 'serve', '--data-dir', str(data),
-                                '--wacli', str(engine), '--helper', str(helper),
+                                '--wacli', str(engine),
                                 '--listen', '127.0.0.1:0', '--owner-stdin'],
                                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.monotonic() + 20
@@ -94,12 +104,28 @@ try:
         time.sleep(0.1)
     check(process.poll() is None and (data / 'control.sock').exists(), 'bundled service starts with private control')
     state = control('GET', '/state')
+    credentials = data / 'credentials.db'
+    check(credentials.is_file() and credentials.stat().st_mode & 0o777 == 0o600,
+          'credential database is stored locally with owner-only permissions')
+    with sqlite3.connect(credentials) as secrets_db:
+        check(secrets_db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok',
+              'local credential database passes SQLite integrity check')
     check(state['scope']['mode'] == 'initial' and state['mcp']['status'] == 'setup_required', 'initial capture keeps MCP unavailable')
     endpoint = state['mcp']['url']
-    check(status(endpoint, '/mcp') == 401, 'public MCP rejects unauthenticated requests')
-    check(status(endpoint, '/state') == 404, 'private controls are absent from public listener')
-    check(status(endpoint, '/mcp', 'untrusted.invalid') == 403, 'public listener rejects unrecognized hosts')
-    control('POST', '/pairing', {'name': 'Disposable smoke', 'client': 'stdio'}, succeeds=False)
+    check(urlparse(endpoint).hostname == '127.0.0.1', 'MCP endpoint is restricted to loopback')
+    check('cloud' not in state, 'service state exposes only local connection settings')
+    check(status(endpoint, '/mcp') == 401, 'local MCP rejects unauthenticated requests')
+    check(status(endpoint, '/state') == 404, 'private controls are absent from MCP listener')
+    check(status(endpoint, '/mcp', 'untrusted.invalid') == 403, 'MCP listener rejects unrecognized hosts')
+    retired_routes = ['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource',
+                      '/.well-known/oauth-protected-resource/mcp', '/oauth/bootstrap', '/oauth/ready',
+                      '/oauth/authorize', '/oauth/consent', '/oauth/register', '/oauth/token']
+    check(all(status(endpoint, path) == 404 for path in retired_routes), 'OAuth and external authorization routes are absent')
+    control('POST', '/cloud/instructions', {'provider': 'ngrok', 'name': 'Retired cloud setup'}, succeeds=False)
+    check(True, 'external agent setup is unavailable')
+    control('POST', '/pairing', {'name': 'Disposable smoke'}, succeeds=False)
+    control('POST', '/agents/manual', {'name': 'Disposable manual'}, succeeds=False)
+    check(True, 'manual connection creation waits for confirmed scope')
     control('PUT', '/scope', {'mode': 'selected', 'chat_ids': ['123@s.whatsapp.net']})
     initialized_store = subprocess.run([str(engine), '--store', str(data / 'store'),
                                         '--content-policy', str(data / 'content-policy.json'),
@@ -114,25 +140,72 @@ try:
                             [('123@s.whatsapp.net', 'm' + str(i), 1000 + i, 0, 'alpha fixture ' + str(i), 'alpha fixture ' + str(i))
                              for i in range(1, 4)] +
                             [('999@s.whatsapp.net', 'hidden1', 1004, 0, 'alpha secret fixture', 'alpha secret fixture')])
-    invitation = control('POST', '/pairing', {'name': 'Disposable smoke', 'client': 'stdio'})
-    installed = invoke(['setup', '--data-dir', str(data), '--client', 'stdio', '--token-stdin'], invitation['token'].encode())
-    connection_ids.add(installed['connection_id'])
-    connection = installed['connection_id']
-    check(installed['status'] == 'installed_and_verified', 'helper stores credential in Keychain and verifies authenticated HTTP')
-    invoke(['setup', '--data-dir', str(data), '--client', 'stdio', '--token-stdin'], invitation['token'].encode(), succeeds=False)
-    check(True, 'pairing invitation cannot be redeemed twice')
-    bridge = subprocess.Popen([str(helper), 'stdio', '--data-dir', str(data), '--connection', connection],
-                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-    initialized = rpc('initialize', {'protocolVersion': '2025-11-25', 'capabilities': {},
-                                     'clientInfo': {'name': 'disposable-bundle-smoke', 'version': '1'}}, 1)
-    check(initialized['serverInfo']['name'] == 'LocalWhatsAppMCP stdio adapter', 'stdio adapter initializes')
-    rpc('notifications/initialized', {}, None)
-    listing = rpc('tools/list', {}, 2)
-    check(len(listing['tools']) == 9, 'stdio adapter discovers all nine MCP tools')
-    tool_status = rpc('tools/call', {'name': 'check_status', 'arguments': {}}, 3)
-    check(not tool_status.get('isError', False), 'stdio adapter forwards authenticated status')
+    manual = control('POST', '/agents/manual', {'name': 'Disposable manual'})
+    details = control('GET', '/agents/' + manual['id'] + '/credentials')
+    check(details == manual and manual['url'] == endpoint + '/mcp',
+          'manual connection details reopen with the same URL and access token')
+    check(manual['access_token'] not in json.dumps(control('GET', '/state')),
+          'normal service state omits the manual access token')
+    code, initialized_manual = direct_rpc(manual, 'initialize', {
+        'protocolVersion': '2025-11-25', 'capabilities': {},
+        'clientInfo': {'name': 'manual-bundle-smoke', 'version': '1'}}, 1)
+    check(code == 200 and initialized_manual.get('result', {}).get('serverInfo', {}).get('name') == 'LocalWhatsAppMCP',
+          'manually configured URL and bearer initialize directly over HTTP')
+    code, manual_messages = direct_rpc(manual, 'tools/call', {
+        'name': 'read_messages', 'arguments': {'chat_id': '123@s.whatsapp.net', 'limit': 10}}, 2)
+    result = manual_messages.get('result', {})
+    check(code == 200 and not result.get('isError', False)
+          and len(result.get('structuredContent', {}).get('messages', [])) == 3
+          and 'secret fixture' not in json.dumps(result),
+          'direct manual bearer reads only selected synthetic messages')
+    invitation = control('POST', '/pairing', {'name': 'Disposable smoke'})
+    exchange_url = endpoint + '/pairing/redeem'
+    check(exchange_url in invitation['instructions'] and invitation['token'] in invitation['instructions']
+          and str(helper) not in invitation['instructions'],
+          'generic instructions contain the HTTP exchange endpoint and temporary pairing code')
+    code, _, _ = exchange(exchange_url, {'token': invitation['token']}, method='GET')
+    check(code == 405, 'HTTP pairing rejects GET without consuming the invitation')
+    code, _, _ = exchange(exchange_url, {'token': invitation['token']}, headers={'Host': 'untrusted.invalid'})
+    check(code == 403, 'HTTP pairing rejects unrecognized hosts without consuming the invitation')
+    code, _, _ = exchange(exchange_url, {'token': invitation['token']}, headers={'Origin': 'https://untrusted.invalid'})
+    check(code == 403, 'HTTP pairing rejects foreign origins without consuming the invitation')
+    code, _, _ = exchange(exchange_url, {})
+    check(400 <= code < 500, 'HTTP pairing rejects a missing temporary code')
+    code, paired, cache_control = exchange(exchange_url, {'token': invitation['token']})
+    check(code == 200 and paired['url'] == endpoint + '/mcp' and paired['token_type'] == 'Bearer'
+          and paired['access_token'] != invitation['token'] and paired['id'],
+          'single-use HTTP exchange returns a durable bearer and complete MCP URL')
+    check('no-store' in cache_control, 'HTTP pairing response prevents credential caching')
+    connection = paired['id']
+    paired_state = control('GET', '/state')
+    grant = next(agent for agent in paired_state['agents'] if agent['id'] == connection)
+    check(grant['pairing_invitation_id'] == invitation['invitation_id'] and not grant['send_enabled']
+          and paired['access_token'] not in json.dumps(paired_state),
+          'HTTP pairing records the invitation identity, starts read-only, and keeps credentials out of state')
+    paired_details = control('GET', '/agents/' + connection + '/credentials')
+    check(paired_details == {'id': connection, 'name': grant['name'], 'url': paired['url'],
+                            'access_token': paired['access_token']},
+          'private credentials for an HTTP-paired connection return its original URL and bearer')
+    after_details = control('GET', '/state')
+    after_grant = next(agent for agent in after_details['agents'] if agent['id'] == connection)
+    check(after_grant == grant and not after_grant['send_enabled']
+          and len(after_details['agents']) == len(paired_state['agents'])
+          and paired['access_token'] not in json.dumps(after_details),
+          'opening paired credentials preserves the grant, disabled sending, and redacted state')
+    code, _, _ = exchange(endpoint + '/agents/' + connection + '/credentials', {}, method='GET',
+                          headers={'Authorization': 'Bearer ' + paired['access_token']})
+    check(code == 404, 'paired credentials remain private even to an authenticated HTTP client')
+    code, _, _ = exchange(exchange_url, {'token': invitation['token']})
+    check(code == 401, 'pairing invitation cannot be redeemed twice over HTTP')
+    initialized = rpc(paired, 'initialize', {'protocolVersion': '2025-11-25', 'capabilities': {},
+                                            'clientInfo': {'name': 'disposable-bundle-smoke', 'version': '1'}}, 1)
+    check(initialized['serverInfo']['name'] == 'LocalWhatsAppMCP', 'HTTP-paired bearer initializes MCP directly')
+    listing = rpc(paired, 'tools/list', {}, 2)
+    check(len(listing['tools']) == 9, 'HTTP-paired bearer discovers all nine MCP tools')
+    tool_status = rpc(paired, 'tools/call', {'name': 'check_status', 'arguments': {}}, 3)
+    check(not tool_status.get('isError', False), 'HTTP-paired bearer calls authenticated status')
     def tool(name, arguments, request_id):
-        result = rpc('tools/call', {'name': name, 'arguments': arguments}, request_id)
+        result = rpc(paired, 'tools/call', {'name': name, 'arguments': arguments}, request_id)
         if result.get('isError', False):
             raise RuntimeError('tool failed against synthetic archive: ' + name)
         encoded = json.dumps(result)
@@ -154,26 +227,38 @@ try:
     check(len(updates['changes']) == 3 and updates['next_checkpoint'], 'real incremental feed filters hidden references')
     replay = tool('get_updates', {'checkpoint': updates['next_checkpoint']}, 16)
     check(not replay['changes'], 'incremental checkpoint resumes without replaying processed changes')
-    denied = rpc('tools/call', {'name': 'send_text', 'arguments': {'chat_id': '123@s.whatsapp.net',
+    denied = rpc(paired, 'tools/call', {'name': 'send_text', 'arguments': {'chat_id': '123@s.whatsapp.net',
                                                                 'text': 'synthetic fixture', 'request_id': 'smoke-send'}}, 4)
     check(denied.get('isError', False), 'sending remains disabled without dispatch')
+    before_disconnect = control('GET', '/state')
+    disconnected = control('POST', '/whatsapp/disconnect')
+    check(disconnected['whatsapp']['status'] == 'disconnected' and not disconnected['whatsapp'].get('linked')
+          and disconnected['scope'] == before_disconnect['scope']
+          and {grant['id'] for grant in disconnected['agents']} == {grant['id'] for grant in before_disconnect['agents']},
+          'disconnect preserves saved scope and agent grants in the actual bundle')
+    awakened = control('POST', '/lifecycle/wake')
+    check(awakened['whatsapp']['status'] == 'disconnected' and not awakened['whatsapp'].get('qr'),
+          'wake respects intentional disconnect without starting linking')
+    retained = tool('read_messages', {'chat_id': '123@s.whatsapp.net', 'limit': 10}, 19)
+    check(len(retained['messages']) == 3, 'authorized archived messages remain readable after disconnect')
     control('PUT', '/scope', {'mode': 'selected', 'chat_ids': []})
-    removed = rpc('tools/call', {'name': 'read_messages', 'arguments': {'chat_id': '123@s.whatsapp.net'}}, 17)
-    old_checkpoint = rpc('tools/call', {'name': 'get_updates', 'arguments': {'checkpoint': updates['next_checkpoint']}}, 18)
+    removed = rpc(paired, 'tools/call', {'name': 'read_messages', 'arguments': {'chat_id': '123@s.whatsapp.net'}}, 17)
+    old_checkpoint = rpc(paired, 'tools/call', {'name': 'get_updates', 'arguments': {'checkpoint': updates['next_checkpoint']}}, 18)
     check(removed.get('isError', False) and old_checkpoint.get('isError', False), 'scope removal denies reads and invalidates old checkpoints')
-    bridge.stdin.close()
-    bridge.wait(timeout=10)
-    bridge = None
     control('DELETE', '/agents/' + connection)
-    invoke(['doctor', '--data-dir', str(data), '--connection', connection], succeeds=False)
-    check(True, 'revocation immediately denies the installed credential')
+    code, _ = direct_rpc(paired, 'tools/list', {}, 20)
+    control('GET', '/agents/' + connection + '/credentials', succeeds=False)
+    check(code == 401, 'revocation immediately denies the HTTP-paired bearer and its credentials')
+    control('DELETE', '/agents/' + manual['id'])
+    code, _ = direct_rpc(manual, 'tools/list', {}, 3)
+    control('GET', '/agents/' + manual['id'] + '/credentials', succeeds=False)
+    check(code == 401, 'revocation immediately denies the direct manual bearer and its details')
     process.stdin.close()
     process.wait(timeout=15)
     check(process.returncode == 0 and not (data / 'control.sock').exists(), 'owner pipe closure stops the service and removes control socket')
     process = None
 finally:
-    cleanup_errors = []
-    for child in (bridge, process):
+    for child in (process,):
         if child is not None and child.poll() is None:
             try:
                 child.terminate()
@@ -183,31 +268,8 @@ finally:
                 child.wait(timeout=5)
             except ProcessLookupError:
                 pass
-    # Include credentials saved before a failed setup returned its connection ID.
-    for record in (data / 'connections').glob('*.json'):
-        connection_ids.add(record.stem)
-    settings = data / 'settings.json'
-    if settings.exists():
-        try:
-            connection_ids.update(json.loads(settings.read_text())['grants'])
-        except (OSError, ValueError, KeyError):
-            cleanup_errors.append('temporary grant identifiers could not be recovered')
-    items = [('com.localwhatsappmcp.cursor', hashlib.sha256(str(data).encode()).hexdigest())]
-    items.extend(('com.localwhatsappmcp.agent', item) for item in connection_ids)
-    for service, account in items:
-        try:
-            deletion = subprocess.run(['/usr/bin/security', 'delete-generic-password', '-s', service, '-a', account],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-            # security maps errSecItemNotFound (-25300) to exit status 44.
-            if deletion.returncode not in (0, 44):
-                cleanup_errors.append(service + ' / ' + account)
-        except (OSError, subprocess.TimeoutExpired):
-            cleanup_errors.append(service + ' / ' + account)
-    if cleanup_errors:
-        raise RuntimeError('Temporary Keychain cleanup incomplete: ' + '; '.join(cleanup_errors) +
-                           '. Recovery metadata retained at ' + str(data))
     shutil.rmtree(data)
 
-print('Bundle smoke passed: ' + str(len(checks)) + ' checks; temporary data and Keychain items removed.')
+print('Bundle smoke passed: ' + str(len(checks)) + ' checks; temporary SQLite data removed.')
 for name in checks:
     print('PASS ' + name)

@@ -79,6 +79,35 @@ extension RuntimeTests {
 }
 
 extension RuntimeTests {
+    func testRecordedStartupFailureWinsBeforeServiceExits() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let executable = dir.appendingPathComponent("helper")
+        try Data("""
+        #!/bin/sh
+        if [ "$1" = "serve" ]; then
+          echo '{"startup_error":"configuration_invalid"}' >&2
+          exec /bin/sleep 60
+        fi
+        echo '{"error":"LocalWhatsAppMCP is not running; open the app and retry"}'
+        exit 1
+        """.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let runtime = HelperRuntime(helper: executable, wacli: executable, dataDirectory: dir)
+        try await runtime.start()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let processIdentifier = await runtime.processIdentifier
+        XCTAssertNotNil(processIdentifier, "The startup failure must be handled before process exit")
+        do {
+            _ = try await runtime.control(method: "GET", path: "/state")
+            XCTFail("Startup failed")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("settings.json"), error.localizedDescription)
+        }
+        await runtime.stop()
+    }
+
     func testStartupFailureKeepsSafeSpecificRecoveryAndBoundsOutput() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
