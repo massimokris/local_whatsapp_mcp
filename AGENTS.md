@@ -1,54 +1,95 @@
 # LocalWhatsAppMCP — Agent Instructions
 
+Shared project instructions for coding agents.
+
 ## Overview
 
-LocalWhatsAppMCP is a native macOS menu bar app that connects the user's WhatsApp to multiple agents running on the same Mac through local MCP. The app owns sync, storage, chat scope, and access; the chosen agents own reasoning, schedules, and notifications.
+LocalWhatsAppMCP connects WhatsApp to agents on the same Mac through **MCP**, using a native menu bar app. The app owns sync, storage, chat scope and access. Agents own reasoning, schedules and notifications.
 
-The implementation uses SwiftUI/AppKit in `native/`, the Go MCP service and private app control in `backend/`, and a pinned wacli patch in `vendor/wacli/`. SQLite/FTS5 stores the archive. MCP binds only to loopback; public HTTP exposure, tunnels, and cloud OAuth are outside the current scope. The local trackers retain accepted decisions and implementation history.
+Setup follows **Link WhatsApp → Choose chats → Connect your agent**. Preserve that experience; raise a product question only when evidence requires a material change.
+
+## Architecture
+
+| Area | Implementation |
+| --- | --- |
+| App shell and UI | AppKit manages the menu bar item and panel; SwiftUI renders the dark interface. |
+| State | `@MainActor AppModel` coordinates navigation, app actions and service state. |
+| Native core | `LocalWhatsAppCore` contains state models, chat selection, connection summaries and the helper runtime. |
+| Local service | Go owns policy, agent credentials, MCP operations and engine coordination. Private app control uses a Unix socket; MCP uses loopback HTTP. |
+| WhatsApp engine | Pinned wacli owns the WhatsApp connection and archive writes. A focused patch adds policy and lifecycle integration through its JSON/events boundary. |
+| Storage | SQLite/FTS5 stores the archive. Configuration, credentials and private media live in `~/Library/Application Support/LocalWhatsAppMCP/`. |
+
+### Key architecture decisions
+
+- **Chat scope:** Keep initial capture, confirmed ingestion scope and MCP access distinct. Existing content on disk does not authorize access. Recheck scope, credential revocation and per-agent sending permission on every content/action path.
+- **Local access:** Bind MCP only to loopback. Public endpoints, tunnels and cloud OAuth are outside scope. Expose specific MCP operations rather than unrestricted CLI execution.
+- **Engine ownership:** Keep the wacli patch focused. Preserve its connection/store ownership and documented policy handoff.
+- **Agent pairing:** Copyable instructions contain a temporary, single-use code. The agent configures its own client; sending starts disabled.
+
+## Key files
+
+| File or directory | Purpose |
+| --- | --- |
+| [LocalWhatsAppMCP.swift](native/Sources/LocalWhatsAppMCP/LocalWhatsAppMCP.swift) | App entry point, menu bar item and panel lifecycle. |
+| [AppModel.swift](native/Sources/LocalWhatsAppMCP/AppModel.swift) | Shared state, onboarding, chat scope and connection actions. |
+| [PanelView.swift](native/Sources/LocalWhatsAppMCP/PanelView.swift), [MCPViews.swift](native/Sources/LocalWhatsAppMCP/MCPViews.swift) | WhatsApp, chat selection, settings and agent connection screens. |
+| [LocalWhatsAppCore](native/Sources/LocalWhatsAppCore) | Native models and helper process/control adapter. |
+| [service](backend/internal/service) | MCP authorization, pairing, credentials, scope and sends. |
+| [engine](backend/internal/engine) | wacli process supervision and archive adapter. |
+| [vendor/wacli](vendor/wacli) | Upstream pin, integration patch and engine build scripts. |
+| [scripts](scripts), [packaging](packaging) | Tests, app assembly, signing and distribution. |
 
 ## Read before changing
 
 | Changing | Read |
 | --- | --- |
-| Product behavior, onboarding, access, or scope | [Decision map](docs/wayfinder/map.md) for accepted decisions and their revisions, and [component interfaces](docs/implementation/interfaces.md) for current integration contracts. |
-| Domain terminology | [Domain language](CONTEXT.md) for distinctions between WhatsApp linking, agent pairing, chat scope, and archive contents. |
-| UI, interaction, copy, or accessibility | [Native guide](native/README.md) for safe previews and [native views](native/Sources/LocalWhatsAppMCP) for the existing presentation and interaction patterns. |
-| WhatsApp ingestion or archive access | [Selective-storage research](docs/research/selective-storage.md) for upstream insertion points and required policy coverage. |
-| MCP authentication or agent installation | [Agent-pairing research](docs/research/agent-pairing.md) for client capabilities and the fixed setup experience. |
-| Process ownership, native/service integration, or engine JSON | [Component interfaces](docs/implementation/interfaces.md) and [engine integration](vendor/wacli/README.md). |
-| Building, packaging, or signing | [Build entry points](README.md#build-and-verify) and the relevant [scripts](scripts) for commands and release options. |
-| Planning, claiming, or resolving decisions | [Decision map](docs/wayfinder/map.md) and [tracker operations](docs/agents/issue-tracker.md). |
+| Product behavior or chat scope | [Decision map](docs/wayfinder/map.md) for accepted decisions and revisions, and [component interfaces](docs/implementation/interfaces.md) for current contracts. |
+| Domain terminology | [CONTEXT.md](CONTEXT.md) for WhatsApp linking, agent pairing, chat scope and archive contents. |
+| Service integration or engine behavior | [Component interfaces](docs/implementation/interfaces.md) for ownership and contracts; [engine guide](vendor/wacli/README.md) for the upstream boundary. |
+| UI, copy or accessibility | [Native guide](native/README.md) for safe previews and the native views above for existing patterns. |
+| Ingestion or archive access | [Selective-storage research](docs/research/selective-storage.md) for insertion points and policy coverage. |
+| MCP authentication or agent setup | [Agent-pairing research](docs/research/agent-pairing.md) for client capabilities and setup decisions. |
+| Planning or ticket status | [Tracker operations](docs/agents/issue-tracker.md) and the relevant decision or implementation ticket. |
+
+## Build and run
+
+Use macOS, Xcode Command Line Tools, Swift 5.9 or later, Git and Go 1.27.3. The app targets macOS 13 or later; builds are verified on Apple silicon. Run from the repository root:
+
+```sh
+./scripts/test.sh
+./scripts/build.sh
+./scripts/package.sh
+python3 ./scripts/smoke-bundle.py dist/LocalWhatsAppMCP.app
+```
+
+`test.sh` runs native, backend race/vet, engine FTS5/non-FTS5 and packaging checks. `build.sh` verifies the app; `package.sh` produces DMG/ZIP files and checksums. See [Contributing](README.md#contributing) and the scripts for options. Signing is ad hoc by default; notarization requires release configuration.
+
+For UI checks, use the in-memory demo:
+
+```sh
+swift run --package-path native LocalWhatsAppMCP --demo
+```
+
+Demo mode launches no helpers and leaves real data and saved preferences alone. Live use requires the bundled service and engine.
 
 ## Working agreements
 
-- Preserve the agreed setup experience. The user delegated authentication and other integration details; introduce a product question only when evidence requires a material experience change.
-- Keep initial capture, confirmed ingestion scope, and MCP access distinct. Old content on disk is never permission to expose it.
-- Enforce chat scope and per-agent sending permission in server code on every content/action path. Use specific MCP operations rather than unrestricted CLI execution.
-- Keep the wacli patch focused on required integration behavior. Preserve the documented JSON/events boundary and let wacli own its WhatsApp connection/store writes.
-- Store operational state and private media in the application's data directory. Keep real account data and secrets out of source files, logs, and fixtures.
-- Follow the existing dark native visual language. Keep WhatsApp linking and local MCP pairing distinct; expose local connection status, setup, and per-agent access controls.
+- Keep WhatsApp linking and agent pairing distinct in the UI. Reuse the dark theme, existing controls and accessibility patterns.
+- Keep real account data and secrets out of source, logs and fixtures. Store operational data in the app's data directory.
+- Report synthetic checks separately from live WhatsApp, client reload, login approval and sleep/wake checks. Screenshots and bundle smoke tests do not establish live compatibility.
 
 ## Coding standards
 
-Use meaningful domain names and small interfaces. SwiftUI views render state and invoke actions; put blocking I/O and process work outside the main actor. Keep shared UI state on `@MainActor`. The Go service owns backend policy and integration coordination; upstream-owned WhatsApp persistence stays behind its adapter.
+Use meaningful domain names and small interfaces. Views render state and invoke actions. Keep shared UI state on `@MainActor`; put blocking I/O and process work outside it. Keep backend policy in the Go service and upstream persistence behind the engine adapter.
 
-Use deterministic fixtures for scope transitions, identity aliases, credential revocation, and send permissions. Test failure/restart paths that could expose unselected content or duplicate sends. Present file/configuration failures clearly and retain recoverable state.
+Use deterministic fixtures for scope transitions, identity aliases, credential revocation and sending permissions. Test failure/restart paths that could expose unselected content or duplicate sends. Show file/configuration failures clearly and retain recoverable state.
 
-## Build and verification
+## Git workflow
 
-Run from the project root on macOS:
+Inspect status and diffs before editing. Work on the current branch and stage or commit only owned changes when requested. Push only when requested.
 
-- `./scripts/test.sh`: native tests, backend race tests/vet, engine suites with and without FTS5, and packaging checks.
-- `./scripts/build.sh`: build and verify the native app with bundled Go service and pinned engine.
-- `./scripts/package.sh`: build, verify, and package the app as DMG/ZIP with checksums.
-- `python3 ./scripts/smoke-bundle.py dist/LocalWhatsAppMCP.app`: exercise the actual bundle using synthetic data and a temporary local credential database, with no WhatsApp login.
+Stay within this project unless the task names another path. The sibling `whatsapp-mcp/` experiment is separate work. Local planning and tracker documents are project artifacts; preserve resolution history.
 
-The scripts define toolchain, architecture, signing, and release options. Ad-hoc package verification does not establish Developer ID notarization or runtime compatibility on an untested Mac.
+## Keeping this file current
 
-For documentation changes, check relative links, tracker metadata/dependencies, and agreement with retained decisions. Keep synthetic regression evidence distinct from live WhatsApp, client reload, provider login, and sleep/wake checks. Documentation checks do not establish WhatsApp or client compatibility.
-
-## Git and maintenance
-
-Inspect status before editing; keep work inside this project unless the task names another path. The sibling `whatsapp-mcp/` experiment and reference projects are separate work. Stage or commit only owned changes when requested; do not push as part of local planning.
-
-The glossary defines terms, the map indexes decision tickets, and component interfaces describe current integration contracts. Update the narrowest relevant document and preserve resolution history. These local planning documents are intended project artifacts; do not copy Dock's unrelated rule that its `.scratch/` plans are ignored.
+Update ownership, file responsibilities, commands and conventions here when they change. Keep terms in `CONTEXT.md`, decisions in trackers and contracts in component interfaces. Check links, tracker metadata/dependencies and agreement with retained decisions.
