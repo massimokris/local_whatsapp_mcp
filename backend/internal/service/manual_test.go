@@ -204,8 +204,8 @@ func (manualFixtureEngine) Status() engine.Status {
 func (manualFixtureEngine) Catalog(context.Context) ([]engine.Chat, error) {
 	return []engine.Chat{{ID: "123@s.whatsapp.net", Name: "Selected"}, {ID: "999@s.whatsapp.net", Name: "Excluded"}}, nil
 }
-func (manualFixtureEngine) Resolve(_ context.Context, id string) ([]string, error) {
-	return []string{id}, nil
+func (manualFixtureEngine) ResolveMany(_ context.Context, ids []string) ([]string, error) {
+	return ids, nil
 }
 func (manualFixtureEngine) Call(context.Context, bool, ...string) (json.RawMessage, error) {
 	return nil, errors.New("unexpected fixture engine command")

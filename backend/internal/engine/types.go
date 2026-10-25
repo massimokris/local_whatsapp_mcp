@@ -38,6 +38,6 @@ type Boundary interface {
 	Logout(context.Context) error
 	Status() Status
 	Catalog(context.Context) ([]Chat, error)
-	Resolve(context.Context, string) ([]string, error)
+	ResolveMany(context.Context, []string) ([]string, error)
 	Call(context.Context, bool, ...string) (json.RawMessage, error)
 }

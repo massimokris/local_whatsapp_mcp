@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -104,10 +106,12 @@ func TestLegacyPairingWithoutIdentityStillRedeemsAndAuthenticates(t *testing.T) 
 			s.Close()
 		}
 	}()
-	pairingIdentityControl(t, s, "PUT", "/scope", map[string]string{"mode": "all"}, nil)
 	const legacyToken = "synthetic-legacy-invitation-token"
-	s.cfg.Invites[digest(legacyToken)] = invitation{Name: "Legacy agent", Client: "stdio", Expires: time.Now().Add(time.Hour)}
-	if err := s.saveLocked(); err != nil {
+	// Use the old settings format directly so its client metadata remains in
+	// the fixture even though current invitations no longer retain that field.
+	expires := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	legacySettings := `{"version":1,"credential_storage_version":1,"scope":{"version":1,"revision":2,"mode":"all","chat_ids":[]},"grants":{},"invitations":{"` + digest(legacyToken) + `":{"name":"Legacy agent","client":"stdio","expires":"` + expires + `"}},"sends":{}}`
+	if err := os.WriteFile(filepath.Join(options.DataDir, "settings.json"), []byte(legacySettings), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -119,6 +123,9 @@ func TestLegacyPairingWithoutIdentityStillRedeemsAndAuthenticates(t *testing.T) 
 	}
 	var grant map[string]string
 	pairingIdentityControl(t, s, "POST", "/pairing/redeem", map[string]string{"token": legacyToken}, &grant)
+	if grant["client"] != "generic" {
+		t.Fatal("legacy invitation client metadata changed generic pairing")
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -34,7 +34,6 @@ type Grant struct {
 type invitation struct {
 	ID      string    `json:"id,omitempty"`
 	Name    string    `json:"name"`
-	Client  string    `json:"client"`
 	Expires time.Time `json:"expires"`
 }
 type sendRecord struct {
@@ -149,10 +148,7 @@ func AtomicJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	return AtomicWrite(path, append(b, '\n'), 0600)
-}
-func AtomicWrite(path string, b []byte, mode os.FileMode) error {
-	return persistence.Write(path, b, mode)
+	return persistence.Write(path, append(b, '\n'), 0600)
 }
 func (s *Service) saveLocked() error {
 	return AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), s.cfg)
@@ -160,31 +156,22 @@ func (s *Service) saveLocked() error {
 func (s *Service) publishPolicy() error {
 	return AtomicJSON(filepath.Join(s.opt.DataDir, "content-policy.json"), s.cfg.Scope)
 }
-func (s *Service) LocalURL() string { s.mu.Lock(); defer s.mu.Unlock(); return s.opt.LocalURL }
-func (s *Service) touchGrant(id string) {
+func (s *Service) LocalURL() string { return s.opt.LocalURL }
+func (s *Service) VerifyToken(_ context.Context, token string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	g, ok := s.cfg.Grants[id]
-	if ok {
-		g.Connected = true
-		g.LastSeenAt = time.Now().UTC().Format(time.RFC3339)
-		s.cfg.Grants[id] = g
-	}
-}
-func (s *Service) VerifyToken(ctx context.Context, token string) (string, error) {
-	s.mu.Lock()
 	if s.closed {
-		s.mu.Unlock()
 		return "", ErrUnauthorized
 	}
+	tokenDigest := digest(token)
 	for id, g := range s.cfg.Grants {
-		if g.Digest != "" && g.Digest == digest(token) {
-			s.mu.Unlock()
-			s.touchGrant(id)
+		if g.Digest != "" && g.Digest == tokenDigest {
+			g.Connected = true
+			g.LastSeenAt = time.Now().UTC().Format(time.RFC3339)
+			s.cfg.Grants[id] = g
 			return id, nil
 		}
 	}
-	s.mu.Unlock()
 	return "", ErrUnauthorized
 }
 func (s *Service) State() map[string]any {
@@ -441,7 +428,7 @@ func (s *Service) applyScope(ctx context.Context, p engine.Policy) error {
 	s.mu.Unlock()
 	return err
 }
-func (s *Service) invite(name, _ string) (map[string]any, error) {
+func (s *Service) invite(name string) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -468,7 +455,7 @@ func (s *Service) invite(name, _ string) (map[string]any, error) {
 	}
 	// This identifier only correlates private UI state; the separate token is
 	// still the sole authority to redeem the invitation.
-	candidate.Invites[digest(token)] = invitation{ID: invitationID, Name: name, Client: "generic", Expires: expiry}
+	candidate.Invites[digest(token)] = invitation{ID: invitationID, Name: name, Expires: expiry}
 	if err := AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), candidate); err != nil {
 		return nil, err
 	}
@@ -502,7 +489,7 @@ func (s *Service) redeem(token string) (map[string]string, error) {
 	}
 	id, token := randomToken(), randomToken()
 	if err := secret.SetExisting(s.opt.DataDir, AgentCredentialNamespace, id, token); err != nil {
-		return nil, credentialsError(err)
+		return nil, ErrCredentials
 	}
 	g := Grant{ID: id, Name: inv.Name, Client: "generic", PairingInvitationID: inv.ID, Digest: digest(token), CredentialStorageVersion: credentialStorageVersion}
 	candidate := s.cfg

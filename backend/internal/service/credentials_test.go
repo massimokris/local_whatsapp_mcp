@@ -206,7 +206,7 @@ func TestPairingFailureRetainsInvitationAndDoesNotRecreateLostDatabase(t *testin
 	if err := s.applyScope(context.Background(), engine.Policy{Mode: "all"}); err != nil {
 		t.Fatal(err)
 	}
-	invite, err := s.invite("Fixture", "stdio")
+	invite, err := s.invite("Fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestPairingSettingsFailureDoesNotConsumeInvitationOrPublishGrant(t *testing
 	if err := s.applyScope(context.Background(), engine.Policy{Mode: "all"}); err != nil {
 		t.Fatal(err)
 	}
-	invite, err := s.invite("Fixture", "stdio")
+	invite, err := s.invite("Fixture")
 	if err != nil {
 		t.Fatal(err)
 	}

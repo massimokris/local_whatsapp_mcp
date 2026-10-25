@@ -147,21 +147,8 @@ func (s *Service) allowed(ctx context.Context, p engine.Policy, id string) bool 
 		if s.opt.Engine == nil {
 			return
 		}
-		var aliases []string
-		if batch, ok := s.opt.Engine.(interface {
-			ResolveMany(context.Context, []string) ([]string, error)
-		}); ok {
-			aliases, cache.err = batch.ResolveMany(ctx, p.ChatIDs)
-		} else {
-			for _, selected := range p.ChatIDs {
-				var ids []string
-				ids, cache.err = s.opt.Engine.Resolve(ctx, selected)
-				if cache.err != nil {
-					return
-				}
-				aliases = append(aliases, ids...)
-			}
-		}
+		aliases, err := s.opt.Engine.ResolveMany(ctx, p.ChatIDs)
+		cache.err = err
 		for _, alias := range aliases {
 			cache.allowed[alias] = true
 		}
@@ -279,8 +266,9 @@ func (s *Service) findConversations(ctx context.Context, q Query) (any, error) {
 		return nil, err
 	}
 	filtered := []engine.Chat{}
+	query := strings.ToLower(q.Query)
 	for _, c := range chats {
-		if strings.Contains(strings.ToLower(c.Name+" "+c.ContactName+" "+c.Phone+" "+c.ID), strings.ToLower(q.Query)) {
+		if strings.Contains(strings.ToLower(c.Name+" "+c.ContactName+" "+c.Phone+" "+c.ID), query) {
 			filtered = append(filtered, c)
 		}
 	}

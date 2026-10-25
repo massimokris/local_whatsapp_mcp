@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"io"
 	"net/url"
@@ -382,9 +381,6 @@ func (e *Engine) Call(ctx context.Context, write bool, args ...string) (json.Raw
 	}
 	return env.Data, nil
 }
-func (e *Engine) Resolve(ctx context.Context, id string) ([]string, error) {
-	return e.ResolveMany(ctx, []string{id})
-}
 func (e *Engine) ResolveMany(ctx context.Context, ids []string) ([]string, error) {
 	if len(ids) == 0 {
 		return []string{}, nil
@@ -442,7 +438,7 @@ func (e *Engine) Catalog(ctx context.Context) ([]Chat, error) {
 		out = append(out, c)
 	}
 	if rows.Err() != nil {
-		return nil, fmt.Errorf("local chat catalog could not finish reading")
+		return nil, errors.New("local chat catalog could not finish reading")
 	}
 	rows.Close()
 	// Resolve in bounded batches through wacli; names and phone formatting never

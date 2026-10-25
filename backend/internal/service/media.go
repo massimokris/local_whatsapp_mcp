@@ -39,7 +39,12 @@ func (s *Service) send(ctx context.Context, v Send, file bool) (any, error) {
 	}
 	key := AgentID(ctx) + ":" + v.RequestID
 	b, _ := json.Marshal(v)
-	hash := digest(string(b) + string(rune(map[bool]int{true: 1, false: 0}[file])))
+	// Keep these bytes stable: saved request hashes survive app upgrades.
+	sendKind := byte(0)
+	if file {
+		sendKind = 1
+	}
+	hash := digest(string(append(b, sendKind)))
 	var args []string
 	var path string
 	if file {
@@ -132,11 +137,9 @@ func (s *Service) send(ctx context.Context, v Send, file bool) (any, error) {
 }
 
 type attachment struct {
-	File    string `json:"file"`
-	Chat    string `json:"chat"`
-	Message string `json:"message"`
-	MIME    string `json:"mime"`
-	Name    string `json:"name"`
+	File string `json:"file"`
+	Chat string `json:"chat"`
+	MIME string `json:"mime"`
 }
 
 type AttachmentRequest struct {
@@ -194,7 +197,6 @@ func (s *Service) getAttachment(ctx context.Context, t AttachmentRequest) (any, 
 		Downloaded bool   `json:"downloaded"`
 		Source     string `json:"source"`
 		MIME       string `json:"mime_type"`
-		Bytes      int64  `json:"bytes"`
 	}
 	if json.Unmarshal(raw, &result) != nil || !result.Downloaded {
 		return nil, errors.New("attachment was not downloaded")
@@ -212,7 +214,7 @@ func (s *Service) getAttachment(ctx context.Context, t AttachmentRequest) (any, 
 	if err = os.Chmod(path, 0600); err != nil {
 		return nil, err
 	}
-	a := attachment{File: name, Chat: t.ChatID, Message: t.MessageID, MIME: result.MIME, Name: "attachment"}
+	a := attachment{File: name, Chat: t.ChatID, MIME: result.MIME}
 	b, _ := json.Marshal(a)
 	token := s.seal(cursor{Agent: AgentID(ctx), Revision: p.Revision, Query: "attachment", Upstream: string(b), Expires: time.Now().Add(time.Hour).Unix()})
 	out := map[string]any{"status": "available", "source": result.Source, "bytes": st.Size(), "mime_type": result.MIME, "url": s.LocalURL() + "/attachments/" + token, "authorization": "Use the same agent bearer authentication as MCP. URL expires after one hour and becomes invalid on a scope change."}
@@ -299,7 +301,7 @@ func (s *Service) attachmentHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if e == io.EOF || e != nil {
+		if e != nil {
 			return
 		}
 	}

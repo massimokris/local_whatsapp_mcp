@@ -87,8 +87,8 @@ func TestPinnedEngineStructuredBoundary(t *testing.T) {
 	if err != nil || len(chats) != 1 || chats[0].Archived {
 		t.Fatalf("catalog did not reflect unarchive: %+v, %v", chats, err)
 	}
-	ids, err := e.Resolve(context.Background(), "123@s.whatsapp.net")
-	if err != nil || len(ids) != 2 {
+	ids, err := e.ResolveMany(context.Background(), []string{"123@s.whatsapp.net", "555@g.us"})
+	if err != nil || !reflect.DeepEqual(ids, []string{"123@s.whatsapp.net", "999@lid", "555@g.us"}) {
 		t.Fatal(ids, err)
 	}
 	raw, err := e.Call(context.Background(), false, "messages", "list", "--chat", "123@s.whatsapp.net")

@@ -21,13 +21,6 @@ const cursorCredentialAccount = "archive"
 // exposing SQLite diagnostics, file contents, or credential values.
 var ErrCredentials = errors.New("local credential database is unavailable; restore credentials.db from the same backup as settings.json and reopen the app")
 
-func credentialsError(err error) error {
-	if err == nil {
-		return nil
-	}
-	return ErrCredentials
-}
-
 func (s *Service) loadCredentials() error {
 	if s.cfg.CredentialStorageVersion < 0 || s.cfg.CredentialStorageVersion > credentialStorageVersion {
 		return ErrCredentials
@@ -48,7 +41,7 @@ func (s *Service) loadCredentials() error {
 		key, err = secret.Get(s.opt.DataDir, cursorCredentialNamespace, cursorCredentialAccount)
 	}
 	if err != nil {
-		return credentialsError(err)
+		return ErrCredentials
 	}
 	s.cursorKey, err = base64.RawURLEncoding.DecodeString(key)
 	if err != nil || len(s.cursorKey) != 32 {
@@ -69,7 +62,7 @@ func (s *Service) loadCredentials() error {
 				// fails, GetOrCreate returns this same bearer on the next attempt.
 				token, err := secret.GetOrCreate(s.opt.DataDir, AgentCredentialNamespace, id, randomToken)
 				if err != nil {
-					return credentialsError(err)
+					return ErrCredentials
 				}
 				grant.Digest = digest(token)
 				grant.CredentialStorageVersion = credentialStorageVersion
@@ -111,7 +104,7 @@ func (s *Service) hasInstalledConnection(id, client string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, credentialsError(err)
+		return false, ErrCredentials
 	}
 	var connection struct {
 		ID     string `json:"id"`

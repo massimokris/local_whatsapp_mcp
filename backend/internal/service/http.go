@@ -94,14 +94,15 @@ func (s *Service) ControlHandler() http.Handler {
 			writeJSON(w, 200, s.State())
 		case r.Method == "POST" && r.URL.Path == "/pairing":
 			var p struct {
-				Name   string `json:"name"`
+				Name string `json:"name"`
+				// Accepted for older callers; all invitations use generic pairing.
 				Client string `json:"client"`
 			}
 			if err := decode(r, &p); err != nil {
 				apiError(w, err)
 				return
 			}
-			v, err := s.invite(p.Name, p.Client)
+			v, err := s.invite(p.Name)
 			if err != nil {
 				apiError(w, err)
 				return

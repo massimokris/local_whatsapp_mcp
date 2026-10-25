@@ -40,7 +40,7 @@ func httpPairingRequest(s *Service, method, body, contentType string) *httptest.
 
 func httpPairingInvite(t *testing.T, s *Service) string {
 	t.Helper()
-	invitation, err := s.invite("My local agent", "")
+	invitation, err := s.invite("My local agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestHTTPPairingLifecycleGatesRetainInvitation(t *testing.T) {
 			if w := httpPairingRequest(s, "POST", `{"token":"`+token+`"}`, "application/json"); w.Code != status || len(s.cfg.Grants) != 0 || len(s.cfg.Invites) != 1 {
 				t.Fatalf("lifecycle gate did not preserve invitation: status %d", w.Code)
 			}
-			if _, err := s.invite("Blocked", ""); err == nil {
+			if _, err := s.invite("Blocked"); err == nil {
 				t.Fatal("lifecycle gate allowed invitation creation")
 			}
 		})
@@ -327,7 +327,7 @@ func TestHTTPPairingStorageFailureCanRetry(t *testing.T) {
 	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.invite("Unsaved invitation", ""); err == nil || len(s.cfg.Invites) != 1 {
+	if _, err := s.invite("Unsaved invitation"); err == nil || len(s.cfg.Invites) != 1 {
 		t.Fatal("failed invitation save changed the available invitations")
 	}
 	w := httpPairingRequest(s, "POST", `{"token":"`+token+`"}`, "application/json")

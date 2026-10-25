@@ -45,7 +45,7 @@ func (s *Service) createManualConnection(name string) (connectionCredentials, er
 	// an interrupted settings write may leave an unused secret, never an active
 	// grant whose bearer was not saved. A retry creates a fresh connection.
 	if err := secret.SetExisting(s.opt.DataDir, AgentCredentialNamespace, id, token); err != nil {
-		return connectionCredentials{}, credentialsError(err)
+		return connectionCredentials{}, ErrCredentials
 	}
 	grant := Grant{ID: id, Name: name, Client: "manual", Digest: digest(token), CredentialStorageVersion: credentialStorageVersion}
 	candidate := s.cfg

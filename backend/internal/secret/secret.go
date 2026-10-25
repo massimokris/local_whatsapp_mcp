@@ -31,25 +31,16 @@ func Get(dataDir, namespace, account string) (string, error) {
 	return readCredential(db, namespace, account)
 }
 
-// Set inserts or replaces a credential. Credentials never appear in SQL text.
-func Set(dataDir, namespace, account, value string) error {
-	return setCredential(dataDir, namespace, account, value, true)
-}
-
 // SetExisting inserts or replaces a credential only in an existing database.
 // It cannot silently recreate a database that was lost after application setup.
 func SetExisting(dataDir, namespace, account, value string) error {
-	return setCredential(dataDir, namespace, account, value, false)
-}
-
-func setCredential(dataDir, namespace, account, value string, create bool) error {
 	if err := validateKey(namespace, account); err != nil {
 		return err
 	}
 	if value == "" {
 		return errors.New("a local credential cannot be empty")
 	}
-	db, err := openStore(dataDir, create)
+	db, err := openStore(dataDir, false)
 	if err != nil {
 		return err
 	}

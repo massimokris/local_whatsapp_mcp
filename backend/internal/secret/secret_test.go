@@ -18,7 +18,7 @@ func TestPersistenceAndNamespaces(t *testing.T) {
 		{"agent", "archive", "separate-token"},
 		{"agent", "other", "other-token"},
 	} {
-		if err := Set(dir, credential.namespace, credential.account, credential.value); err != nil {
+		if _, err := GetOrCreate(dir, credential.namespace, credential.account, func() string { return credential.value }); err != nil {
 			t.Fatal(err)
 		}
 		got, err := Get(dir, credential.namespace, credential.account)
@@ -26,7 +26,7 @@ func TestPersistenceAndNamespaces(t *testing.T) {
 			t.Fatalf("credential did not persist: %q, %v", got, err)
 		}
 	}
-	if err := Set(dir, "internal", "archive", "replacement-key"); err != nil {
+	if err := SetExisting(dir, "internal", "archive", "replacement-key"); err != nil {
 		t.Fatal(err)
 	}
 	if err := SetExisting(dir, "agent", "new-agent", "new-agent-token"); err != nil {
@@ -125,7 +125,7 @@ func TestPrivatePermissionsIncludeJournal(t *testing.T) {
 	if err := os.Chmod(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Set(dir, "internal", "archive", "key"); err != nil {
+	if _, err := GetOrCreate(dir, "internal", "archive", func() string { return "key" }); err != nil {
 		t.Fatal(err)
 	}
 	assertMode(t, dir, 0700)
@@ -210,7 +210,7 @@ func TestRejectsSymlinksAndNonRegularFiles(t *testing.T) {
 				}
 				dir = link
 			}
-			if err := Set(dir, "internal", "archive", "private-value"); err == nil {
+			if _, err := GetOrCreate(dir, "internal", "archive", func() string { return "private-value" }); err == nil {
 				t.Fatal("accepted a symlink or non-regular database path")
 			}
 			got, err := os.ReadFile(outside)

@@ -136,8 +136,8 @@ func (e *fixtureEngine) Status() engine.Status                            { retu
 func (e *fixtureEngine) Catalog(context.Context) ([]engine.Chat, error) {
 	return []engine.Chat{{ID: "123@s.whatsapp.net", Name: "Work"}, {ID: "999@s.whatsapp.net", Name: "Family"}}, nil
 }
-func (e *fixtureEngine) Resolve(_ context.Context, id string) ([]string, error) {
-	return []string{id}, nil
+func (e *fixtureEngine) ResolveMany(_ context.Context, ids []string) ([]string, error) {
+	return ids, nil
 }
 func (e *fixtureEngine) Call(_ context.Context, write bool, args ...string) (json.RawMessage, error) {
 	if write {
