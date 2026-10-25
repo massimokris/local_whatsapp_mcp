@@ -20,7 +20,6 @@ fi
 mkdir "$stage/image"
 ditto "$app" "$stage/image/LocalWhatsAppMCP.app"
 ln -s /Applications "$stage/image/Applications"
-cp "$root/packaging/Install.txt" "$stage/image/Install.txt"
 hdiutil create -volname LocalWhatsAppMCP -srcfolder "$stage/image" -ov -format UDZO "$stage/$name.dmg"
 if [ -n "${SIGNING_IDENTITY:-}" ] && [ "$SIGNING_IDENTITY" != - ]; then
   codesign --sign "$SIGNING_IDENTITY" --timestamp "$stage/$name.dmg"
