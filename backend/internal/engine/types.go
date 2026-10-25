@@ -22,15 +22,19 @@ type Chat struct {
 	LastActivity string   `json:"last_activity"`
 }
 type Status struct {
-	Linked      bool   `json:"linked"`
-	Status      string `json:"status"`
-	Detail      string `json:"detail"`
-	QR          string `json:"qr,omitempty"`
-	LastEventAt string `json:"last_event_at,omitempty"`
+	DisconnectPending bool   `json:"disconnect_pending,omitempty"`
+	Linked            bool   `json:"linked"`
+	Status            string `json:"status"`
+	Detail            string `json:"detail"`
+	QR                string `json:"qr,omitempty"`
+	LastEventAt       string `json:"last_event_at,omitempty"`
+	LastSyncedAt      string `json:"last_synced_at,omitempty"`
 }
 type Boundary interface {
+	RestoreSession(context.Context) error
 	Start(context.Context, Policy, bool) error
 	Stop(context.Context) error
+	Logout(context.Context) error
 	Status() Status
 	Catalog(context.Context) ([]Chat, error)
 	Resolve(context.Context, string) ([]string, error)

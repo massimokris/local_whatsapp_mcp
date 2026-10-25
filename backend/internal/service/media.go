@@ -22,6 +22,9 @@ func (s *Service) send(ctx context.Context, v Send, file bool) (any, error) {
 	if !s.allowed(ctx, p, v.ChatID) {
 		return nil, ErrScope
 	}
+	if err = s.requireWhatsAppConnection(); err != nil {
+		return nil, err
+	}
 	if len(v.RequestID) < 1 || len(v.RequestID) > 128 {
 		return nil, errors.New("request_id must contain 1 to 128 characters")
 	}
@@ -174,7 +177,16 @@ func (s *Service) getAttachment(ctx context.Context, t AttachmentRequest) (any, 
 	}
 	name := digest(t.ChatID + ":" + t.MessageID)
 	path := filepath.Join(dir, name)
-	raw, err := s.opt.Engine.Call(ctx, true, "media", "download", "--chat", t.ChatID, "--id", t.MessageID, "--output", path, "--retry-on-phone")
+	connected := s.requireWhatsAppConnection() == nil
+	args := []string{"media", "download", "--chat", t.ChatID, "--id", t.MessageID, "--output", path}
+	if connected {
+		args = append(args, "--retry-on-phone")
+	} else {
+		// The engine verifies cached bytes against retained media metadata. A
+		// cache miss must stop before CDN access, authentication, or phone retry.
+		args = append(args, "--cache-only")
+	}
+	raw, err := s.opt.Engine.Call(ctx, connected, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +198,9 @@ func (s *Service) getAttachment(ctx context.Context, t AttachmentRequest) (any, 
 	}
 	if json.Unmarshal(raw, &result) != nil || !result.Downloaded {
 		return nil, errors.New("attachment was not downloaded")
+	}
+	if !connected && result.Source != "cache" {
+		return nil, errors.New("the offline attachment cache could not be verified")
 	}
 	if err = s.finish(ctx, p); err != nil {
 		return nil, err
@@ -200,7 +215,7 @@ func (s *Service) getAttachment(ctx context.Context, t AttachmentRequest) (any, 
 	a := attachment{File: name, Chat: t.ChatID, Message: t.MessageID, MIME: result.MIME, Name: "attachment"}
 	b, _ := json.Marshal(a)
 	token := s.seal(cursor{Agent: AgentID(ctx), Revision: p.Revision, Query: "attachment", Upstream: string(b), Expires: time.Now().Add(time.Hour).Unix()})
-	out := map[string]any{"status": "available", "source": result.Source, "bytes": st.Size(), "mime_type": result.MIME, "url": s.PublicURL() + "/attachments/" + token, "authorization": "Use the same agent bearer authentication as MCP. URL expires after one hour and becomes invalid on a scope change."}
+	out := map[string]any{"status": "available", "source": result.Source, "bytes": st.Size(), "mime_type": result.MIME, "url": s.LocalURL() + "/attachments/" + token, "authorization": "Use the same agent bearer authentication as MCP. URL expires after one hour and becomes invalid on a scope change."}
 	if t.Offset < 0 || t.Offset > st.Size() {
 		return nil, errors.New("attachment offset is outside the file")
 	}

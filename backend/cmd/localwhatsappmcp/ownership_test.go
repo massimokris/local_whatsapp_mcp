@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/massi/localwhatsappmcp/internal/service"
-	"github.com/massi/localwhatsappmcp/internal/setup"
 )
 
 func TestServiceOwnerFixture(t *testing.T) {
@@ -42,7 +41,7 @@ func TestServiceOwnerFixture(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { io.Copy(io.Discard, os.Stdin); cancel() }()
-	opt := service.Options{DataDir: dir, HelperPath: os.Args[0], CursorKey: []byte("01234567890123456789012345678901")}
+	opt := service.Options{DataDir: dir, CursorKey: []byte("01234567890123456789012345678901")}
 	if err := serve(ctx, opt, filepath.Join(dir, "wacli"), "127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +79,7 @@ func TestServiceAndWriterStopAfterAbruptOwnerDeath(t *testing.T) {
 	servicePID := readPID("service.pid")
 	defer syscall.Kill(servicePID, syscall.SIGKILL)
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		_, err := setup.Control(context.Background(), dir, "POST", "/whatsapp/connect", []byte("{}"))
+		_, err := controlRequest(context.Background(), dir, "POST", "/whatsapp/connect", []byte("{}"))
 		if err == nil {
 			break
 		}
@@ -122,5 +121,26 @@ func TestStartupReportsSafeStructuredRecovery(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"startup_error":"configuration_invalid"`) || strings.Contains(string(out), "private-fixture") {
 		t.Fatalf("unsafe or missing recovery diagnostic: %s", out)
+	}
+}
+
+func TestCredentialFailureReportsSafeStructuredRecovery(t *testing.T) {
+	dir := t.TempDir()
+	s, err := service.New(service.Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if err := os.WriteFile(filepath.Join(dir, "credentials.db"), []byte("private-fixture-token-invalid-database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStartupDiagnosticFixture$")
+	cmd.Env = append(os.Environ(), "LWMCP_DIAGNOSTIC_FIXTURE="+dir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("invalid credential database accepted")
+	}
+	if !strings.Contains(string(out), `"startup_error":"credentials_unavailable"`) || strings.Contains(string(out), "private-fixture") {
+		t.Fatalf("unsafe or missing credential recovery diagnostic: %s", out)
 	}
 }

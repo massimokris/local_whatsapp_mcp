@@ -12,7 +12,7 @@ import (
 	"github.com/massi/localwhatsappmcp/internal/engine"
 	"github.com/massi/localwhatsappmcp/internal/persistence"
 	"github.com/massi/localwhatsappmcp/internal/secret"
-	"net/http"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,15 +21,18 @@ import (
 )
 
 type Grant struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Client      string `json:"client"`
-	SendEnabled bool   `json:"send_enabled"`
-	Connected   bool   `json:"connected"`
-	LastSeenAt  string `json:"last_seen_at,omitempty"`
-	Digest      string `json:"digest,omitempty"`
+	ID                       string `json:"id"`
+	Name                     string `json:"name"`
+	Client                   string `json:"client"`
+	PairingInvitationID      string `json:"pairing_invitation_id,omitempty"`
+	SendEnabled              bool   `json:"send_enabled"`
+	Connected                bool   `json:"connected"`
+	LastSeenAt               string `json:"last_seen_at,omitempty"`
+	Digest                   string `json:"digest,omitempty"`
+	CredentialStorageVersion int    `json:"credential_storage_version,omitempty"`
 }
 type invitation struct {
+	ID      string    `json:"id,omitempty"`
 	Name    string    `json:"name"`
 	Client  string    `json:"client"`
 	Expires time.Time `json:"expires"`
@@ -40,28 +43,23 @@ type sendRecord struct {
 	MessageID string `json:"message_id,omitempty"`
 }
 type config struct {
-	Version int                   `json:"version"`
-	Scope   engine.Policy         `json:"scope"`
-	Grants  map[string]Grant      `json:"grants"`
-	Invites map[string]invitation `json:"invitations"`
-	Sends   map[string]sendRecord `json:"sends"`
+	Version                  int                   `json:"version"`
+	CredentialStorageVersion int                   `json:"credential_storage_version,omitempty"`
+	Scope                    engine.Policy         `json:"scope"`
+	Grants                   map[string]Grant      `json:"grants"`
+	Invites                  map[string]invitation `json:"invitations"`
+	Sends                    map[string]sendRecord `json:"sends"`
 
-	Linked     bool `json:"linked"`
-	Transition bool `json:"transition"`
-}
-type Extension interface {
-	PublicHandler() http.Handler
-	ControlHandler() http.Handler
-	State() any
-	Close() error
+	Linked               bool `json:"linked"`
+	Transition           bool `json:"transition"`
+	WhatsAppDisconnected bool `json:"whatsapp_disconnected,omitempty"`
+	DisconnectPending    bool `json:"disconnect_pending,omitempty"`
 }
 type Options struct {
-	CursorKey        []byte // Optional deterministic key for isolated fixtures; production uses Keychain.
-	DataDir          string
-	HelperPath       string
-	Engine           engine.Boundary
-	LocalURL         string
-	ExtensionFactory func(*Service) (Extension, error)
+	CursorKey []byte // Optional deterministic key for isolated fixtures; production persists the key in private SQLite storage.
+	DataDir   string
+	Engine    engine.Boundary
+	LocalURL  string
 }
 type Service struct {
 	cursorKey        []byte
@@ -69,19 +67,18 @@ type Service struct {
 	operations       sync.RWMutex
 	cfg              config
 	opt              Options
-	ext              Extension
-	externalVerifier func(context.Context, string) (string, error)
 	lastError        string
-	publicURL        string
 	generation       context.Context
 	cancelGeneration context.CancelFunc
 	closed           bool
+	disconnecting    bool
 }
 
 var ErrUnauthorized = errors.New("agent is not authorized")
 var ErrScope = errors.New("conversation is outside the current chat scope")
 var ErrTransition = errors.New("chat scope is being applied; retry after sync recovers")
 var ErrSetup = errors.New("confirm chat scope in LocalWhatsAppMCP first")
+var ErrDisconnected = errors.New("WhatsApp is disconnected; connect it in the app before sending messages or downloading attachments")
 
 func randomToken() string {
 	b := make([]byte, 32)
@@ -105,7 +102,7 @@ func New(opt Options) (*Service, error) {
 	s.generation, s.cancelGeneration = context.WithCancel(context.Background())
 	b, err := os.ReadFile(filepath.Join(opt.DataDir, "settings.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		for _, p := range []string{"content-policy.json", "store/session.db", "store/wacli.db"} {
+		for _, p := range []string{"content-policy.json", "store/session.db", "store/wacli.db", "credentials.db"} {
 			if _, e := os.Stat(filepath.Join(opt.DataDir, p)); e == nil {
 				return nil, errors.New("saved configuration is missing; restore settings.json before reopening this archive")
 			}
@@ -119,35 +116,26 @@ func New(opt Options) (*Service, error) {
 	} else if json.Unmarshal(b, &s.cfg) != nil || s.cfg.Version != 1 || s.cfg.Scope.Version != 1 || s.cfg.Scope.Revision < 1 || s.cfg.Grants == nil || s.cfg.Invites == nil || s.cfg.Sends == nil {
 		return nil, errors.New("saved configuration is invalid; restore it before restarting")
 	}
-	if len(opt.CursorKey) > 0 {
-		s.cursorKey = append([]byte(nil), opt.CursorKey...)
-	} else {
-		account := digest(opt.DataDir)
-		key, keyErr := secret.Get("com.localwhatsappmcp.cursor", account)
-		if errors.Is(keyErr, secret.ErrNotFound) {
-			key = randomToken()
-			keyErr = secret.Set("com.localwhatsappmcp.cursor", account, key)
+	// Legacy hosted connections have no local bearer credential and cannot be
+	// restored by this local-only service. Retain every local connection.
+	for id, grant := range s.cfg.Grants {
+		if grant.Client == "cloud" {
+			delete(s.cfg.Grants, id)
 		}
-		if keyErr != nil {
-			return nil, keyErr
-		}
-		s.cursorKey, keyErr = base64.RawURLEncoding.DecodeString(key)
-		if keyErr != nil {
-			return nil, errors.New("app credential is invalid in Keychain")
-		}
-	}
-	if len(s.cursorKey) != 32 {
-		return nil, errors.New("app cursor key must contain 32 bytes")
 	}
 	if !validMode(s.cfg.Scope.Mode, true) {
 		return nil, errors.New("saved chat scope is invalid")
 	}
+	if err := s.loadCredentials(); err != nil {
+		return nil, err
+	}
 	if err := s.publishPolicy(); err != nil {
 		return nil, err
 	}
-	if opt.ExtensionFactory != nil {
-		s.ext, err = opt.ExtensionFactory(s)
-		if err != nil {
+	if s.cfg.Linked && !s.cfg.WhatsAppDisconnected && opt.Engine != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := opt.Engine.RestoreSession(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -172,44 +160,8 @@ func (s *Service) saveLocked() error {
 func (s *Service) publishPolicy() error {
 	return AtomicJSON(filepath.Join(s.opt.DataDir, "content-policy.json"), s.cfg.Scope)
 }
-func (s *Service) DataDir() string      { return s.opt.DataDir }
-func (s *Service) LocalURL() string     { s.mu.Lock(); defer s.mu.Unlock(); return s.opt.LocalURL }
-func (s *Service) SetLocalURL(u string) { s.mu.Lock(); s.opt.LocalURL = u; s.mu.Unlock() }
-func (s *Service) PublicURL() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.publicURL != "" {
-		return s.publicURL
-	}
-	return s.opt.LocalURL
-}
-func (s *Service) SetPublicURL(u string) { s.mu.Lock(); s.publicURL = u; s.mu.Unlock() }
-func (s *Service) SetExternalVerifier(f func(context.Context, string) (string, error)) {
-	s.mu.Lock()
-	s.externalVerifier = f
-	s.mu.Unlock()
-}
-func (s *Service) CreateCloudGrant(name, client string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cfg.Scope.Mode == "initial" {
-		return "", ErrSetup
-	}
-	g := Grant{ID: randomToken(), Name: name, Client: client}
-	s.cfg.Grants[g.ID] = g
-	if err := s.saveLocked(); err != nil {
-		delete(s.cfg.Grants, g.ID)
-		return "", err
-	}
-	return g.ID, nil
-}
-func (s *Service) VerifyCloudGrant(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.cfg.Grants[id]
-	return ok && !s.closed
-}
-func (s *Service) TouchGrant(id string) {
+func (s *Service) LocalURL() string { s.mu.Lock(); defer s.mu.Unlock(); return s.opt.LocalURL }
+func (s *Service) touchGrant(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.cfg.Grants[id]
@@ -228,19 +180,11 @@ func (s *Service) VerifyToken(ctx context.Context, token string) (string, error)
 	for id, g := range s.cfg.Grants {
 		if g.Digest != "" && g.Digest == digest(token) {
 			s.mu.Unlock()
-			s.TouchGrant(id)
+			s.touchGrant(id)
 			return id, nil
 		}
 	}
-	verify := s.externalVerifier
 	s.mu.Unlock()
-	if verify != nil {
-		id, err := verify(ctx, token)
-		if err == nil && s.VerifyCloudGrant(id) {
-			s.TouchGrant(id)
-			return id, nil
-		}
-	}
 	return "", ErrUnauthorized
 }
 func (s *Service) State() map[string]any {
@@ -248,6 +192,7 @@ func (s *Service) State() map[string]any {
 	grants := make([]Grant, 0, len(s.cfg.Grants))
 	for _, g := range s.cfg.Grants {
 		g.Digest = ""
+		g.CredentialStorageVersion = 0
 		if t, e := time.Parse(time.RFC3339, g.LastSeenAt); e != nil || time.Since(t) > 5*time.Minute {
 			g.Connected = false
 		}
@@ -257,10 +202,22 @@ func (s *Service) State() map[string]any {
 	err := s.lastError
 	url := s.opt.LocalURL
 	transition := s.cfg.Transition
+	disconnected, pending, disconnecting := s.cfg.WhatsAppDisconnected, s.cfg.DisconnectPending, s.disconnecting
 	s.mu.Unlock()
 	status := engine.Status{Status: "disconnected", Detail: "Connect WhatsApp to import available history."}
 	if s.opt.Engine != nil {
 		status = s.opt.Engine.Status()
+	}
+	if disconnected {
+		status = engine.Status{Status: "disconnected", Detail: "WhatsApp is disconnected. Your archive stays on this Mac."}
+		if pending {
+			// A failed or interrupted logout must still offer Disconnect on reopen.
+			status = engine.Status{Status: "attention", Linked: true, DisconnectPending: true, Detail: "WhatsApp sign-out is unfinished. Retry Disconnect."}
+		}
+		if disconnecting {
+			status.Status = "disconnecting"
+			status.Detail = "Signing out of this WhatsApp linked device."
+		}
 	}
 	mcpStatus := "ready"
 	if scope.Mode == "initial" {
@@ -269,11 +226,7 @@ func (s *Service) State() map[string]any {
 	if transition {
 		mcpStatus = "applying_scope"
 	}
-	cloud := any(map[string]any{"enabled": false, "status": "disabled", "provider": "", "hostname": "", "detail": ""})
-	if s.ext != nil {
-		cloud = s.ext.State()
-	}
-	r := map[string]any{"whatsapp": status, "scope": scope, "agents": grants, "mcp": map[string]any{"url": url, "status": mcpStatus}, "cloud": cloud}
+	r := map[string]any{"whatsapp": status, "scope": scope, "agents": grants, "mcp": map[string]any{"url": url, "status": mcpStatus}}
 	if err != "" {
 		r["error"] = err
 	}
@@ -284,14 +237,29 @@ func (s *Service) Resume(ctx context.Context, link bool) error {
 	defer s.operations.Unlock()
 	s.mu.Lock()
 	p := s.cfg.Scope
-	if link {
-		s.cfg.Linked = true
+	if s.closed {
+		s.mu.Unlock()
+		return ErrUnauthorized
 	}
-	linked := s.cfg.Linked
-	if err := s.saveLocked(); err != nil {
+	if s.cfg.WhatsAppDisconnected && !link {
+		s.mu.Unlock()
+		return nil
+	}
+	if link && s.cfg.DisconnectPending {
+		s.mu.Unlock()
+		return errors.New("finish disconnecting WhatsApp before connecting again; retry Disconnect")
+	}
+	candidate := s.cfg
+	if link {
+		candidate.Linked = true
+		candidate.WhatsAppDisconnected = false
+	}
+	if err := AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), candidate); err != nil {
 		s.mu.Unlock()
 		return err
 	}
+	s.cfg = candidate
+	linked := s.cfg.Linked && !s.cfg.WhatsAppDisconnected
 	s.mu.Unlock()
 	if !linked || s.opt.Engine == nil {
 		return nil
@@ -309,6 +277,77 @@ func (s *Service) Resume(ctx context.Context, link bool) error {
 	err := s.saveLocked()
 	s.mu.Unlock()
 	return err
+}
+
+func (s *Service) Disconnect(ctx context.Context) error {
+	// Cancel in-flight MCP work before waiting for its operation lock. No command
+	// can overlap logout or restart the writer behind the user's disconnect.
+	s.mu.Lock()
+	s.cancelGeneration()
+	s.mu.Unlock()
+	s.operations.Lock()
+	defer s.operations.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.disconnecting = false
+		s.generation, s.cancelGeneration = context.WithCancel(context.Background())
+		s.mu.Unlock()
+	}()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrUnauthorized
+	}
+	if s.cfg.WhatsAppDisconnected && !s.cfg.DisconnectPending {
+		s.mu.Unlock()
+		return nil
+	}
+	candidate := s.cfg
+	candidate.Linked = false
+	candidate.WhatsAppDisconnected = true
+	candidate.DisconnectPending = true
+	// Persist intent first. Even a crash during logout must never auto-reconnect.
+	err := AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), candidate)
+	if err == nil {
+		s.cfg = candidate
+		s.disconnecting = true
+		s.lastError = ""
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return s.fail(errors.New("could not save the disconnect request; retry Disconnect"))
+	}
+	if s.opt.Engine == nil {
+		return s.fail(errors.New("WhatsApp engine is unavailable; reopen the app and retry Disconnect"))
+	}
+	if err = s.opt.Engine.Stop(ctx); err != nil {
+		return s.fail(errors.New("WhatsApp sync has not stopped yet; retry Disconnect"))
+	}
+	if err = s.opt.Engine.Logout(ctx); err != nil {
+		return s.fail(err)
+	}
+	s.mu.Lock()
+	candidate = s.cfg
+	candidate.DisconnectPending = false
+	err = AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), candidate)
+	if err == nil {
+		s.cfg = candidate
+		s.lastError = ""
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return s.fail(errors.New("WhatsApp signed out, but the result could not be saved; retry Disconnect"))
+	}
+	return nil
+}
+
+func (s *Service) requireWhatsAppConnection() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.WhatsAppDisconnected {
+		return ErrDisconnected
+	}
+	return nil
 }
 func (s *Service) fail(err error) error {
 	s.mu.Lock()
@@ -328,9 +367,6 @@ func (s *Service) Close() error {
 	s.operations.Lock()
 	defer s.operations.Unlock()
 	var err error
-	if s.ext != nil {
-		err = s.ext.Close()
-	}
 	if s.opt.Engine != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -390,7 +426,7 @@ func (s *Service) applyScope(ctx context.Context, p engine.Policy) error {
 		return s.fail(err)
 	}
 	s.mu.Lock()
-	linked := s.cfg.Linked
+	linked := s.cfg.Linked && !s.cfg.WhatsAppDisconnected
 	s.mu.Unlock()
 	if linked && s.opt.Engine != nil {
 		if err = s.opt.Engine.Start(ctx, p, false); err != nil {
@@ -405,51 +441,78 @@ func (s *Service) applyScope(ctx context.Context, p engine.Policy) error {
 	s.mu.Unlock()
 	return err
 }
-func (s *Service) invite(name, client string) (map[string]any, error) {
+func (s *Service) invite(name, _ string) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cfg.Scope.Mode == "initial" {
-		return nil, ErrSetup
-	}
-	if len(name) > 80 || strings.TrimSpace(name) == "" {
-		return nil, errors.New("give the agent a name")
-	}
-	if client != "codex" && client != "claude" && client != "stdio" {
-		return nil, errors.New("choose codex, claude, or stdio")
-	}
-	token := randomToken()
-	expiry := time.Now().Add(10 * time.Minute)
-	for k, v := range s.cfg.Invites {
-		if time.Now().After(v.Expires) {
-			delete(s.cfg.Invites, k)
-		}
-	}
-	s.cfg.Invites[digest(token)] = invitation{Name: name, Client: client, Expires: expiry}
-	if err := s.saveLocked(); err != nil {
-		return nil, err
-	}
-	instructions := fmt.Sprintf("Connect this agent to LocalWhatsAppMCP. Run the bundled helper %q setup --client %s --data-dir %q --token-stdin and provide this single-use token on standard input (do not put it in command arguments):\n%s\nThe helper installs the credential into macOS Keychain and configures the client. Do not run the headers command in the conversation. This invitation expires at %s; sending starts disabled. Run the helper doctor command after installation. For another stdio client, use the non-secret command printed by setup.", s.opt.HelperPath, client, s.opt.DataDir, token, expiry.UTC().Format(time.RFC3339))
-	return map[string]any{"token": token, "instructions": instructions, "expires_at": expiry.UTC().Format(time.RFC3339)}, nil
-}
-func (s *Service) redeem(token string) (map[string]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := digest(token)
-	inv, ok := s.cfg.Invites[key]
-	if !ok || time.Now().After(inv.Expires) {
+	if s.closed {
 		return nil, ErrUnauthorized
 	}
 	if s.cfg.Scope.Mode == "initial" {
 		return nil, ErrSetup
 	}
-	id, secret := randomToken(), randomToken()
-	g := Grant{ID: id, Name: inv.Name, Client: inv.Client, Digest: digest(secret)}
-	delete(s.cfg.Invites, key)
-	s.cfg.Grants[id] = g
-	if err := s.saveLocked(); err != nil {
-		delete(s.cfg.Grants, id)
+	if s.cfg.Transition {
+		return nil, ErrTransition
+	}
+	name = strings.TrimSpace(name)
+	if len(name) > 80 || name == "" {
+		return nil, errors.New("give the agent a name")
+	}
+	token, invitationID := randomToken(), randomToken()
+	expiry := time.Now().Add(10 * time.Minute)
+	candidate := s.cfg
+	candidate.Invites = maps.Clone(s.cfg.Invites)
+	for k, v := range candidate.Invites {
+		if !time.Now().Before(v.Expires) {
+			delete(candidate.Invites, k)
+		}
+	}
+	// This identifier only correlates private UI state; the separate token is
+	// still the sole authority to redeem the invitation.
+	candidate.Invites[digest(token)] = invitation{ID: invitationID, Name: name, Client: "generic", Expires: expiry}
+	if err := AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), candidate); err != nil {
 		return nil, err
 	}
-	return map[string]string{"id": id, "secret": secret, "client": inv.Client, "url": s.opt.LocalURL}, nil
+	s.cfg = candidate
+	baseURL := strings.TrimRight(s.opt.LocalURL, "/")
+	instructions := fmt.Sprintf("Connect yourself to the LocalWhatsAppMCP server running on this Mac at %s/mcp using Streamable HTTP.\nExchange this single-use pairing code by sending POST %s/pairing/redeem with Content-Type: application/json and this JSON body:\n{\"token\":\"%s\"}\nThe response contains id, url, access_token, and token_type (Bearer). Save access_token privately without printing it in the conversation or logs, and configure your own MCP client to use the returned url with Authorization: Bearer <access_token>. Reload your MCP connection if needed and call check_status to verify it.\nThis pairing code expires at %s. Sending starts disabled; the app controls sending permission and chat scope.", baseURL, baseURL, token, expiry.UTC().Format(time.RFC3339))
+	return map[string]any{"invitation_id": invitationID, "token": token, "instructions": instructions, "expires_at": expiry.UTC().Format(time.RFC3339)}, nil
 }
-func (s *Service) HelperPath() string { return s.opt.HelperPath }
+func (s *Service) redeem(token string) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrUnauthorized
+	}
+	key := digest(token)
+	inv, ok := s.cfg.Invites[key]
+	if !ok || !time.Now().Before(inv.Expires) {
+		return nil, ErrUnauthorized
+	}
+	if s.cfg.Scope.Mode == "initial" {
+		return nil, ErrSetup
+	}
+	if s.cfg.Transition {
+		return nil, ErrTransition
+	}
+	// Store the bearer before publishing its grant. A crash can leave an unused
+	// secret, but never a grant whose credential is missing. A completed grant
+	// is marked so startup will fail closed if its database is later lost.
+	if err := s.checkSigningKey(); err != nil {
+		return nil, err
+	}
+	id, token := randomToken(), randomToken()
+	if err := secret.SetExisting(s.opt.DataDir, AgentCredentialNamespace, id, token); err != nil {
+		return nil, credentialsError(err)
+	}
+	g := Grant{ID: id, Name: inv.Name, Client: "generic", PairingInvitationID: inv.ID, Digest: digest(token), CredentialStorageVersion: credentialStorageVersion}
+	candidate := s.cfg
+	candidate.Invites = maps.Clone(s.cfg.Invites)
+	candidate.Grants = maps.Clone(s.cfg.Grants)
+	delete(candidate.Invites, key)
+	candidate.Grants[id] = g
+	if err := AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), candidate); err != nil {
+		return nil, err
+	}
+	s.cfg = candidate
+	return map[string]string{"id": id, "secret": token, "client": g.Client, "url": s.opt.LocalURL}, nil
+}

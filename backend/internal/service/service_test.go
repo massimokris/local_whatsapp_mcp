@@ -69,7 +69,7 @@ func TestPairingNeedsConfirmedScopeAndRevokesOneAgent(t *testing.T) {
 		t.Fatal("other grant disrupted")
 	}
 	pub := httptest.NewRecorder()
-	s.PublicHandler().ServeHTTP(pub, httptest.NewRequest(http.MethodGet, "/state", nil))
+	s.LocalHandler().ServeHTTP(pub, httptest.NewRequest(http.MethodGet, "/state", nil))
 	if pub.Code != 404 {
 		t.Fatal("private route public")
 	}
@@ -100,7 +100,7 @@ func TestMCPFiltersOldArchiveAndBlocksDirectSend(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+g["secret"])
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
-		s.PublicHandler().ServeHTTP(w, req)
+		s.LocalHandler().ServeHTTP(w, req)
 		return w.Body.String()
 	}
 	if body := call("find_conversations", `{}`); !strings.Contains(body, "Work") || strings.Contains(body, "Family") {
@@ -128,8 +128,10 @@ func TestMCPFiltersOldArchiveAndBlocksDirectSend(t *testing.T) {
 
 type fixtureEngine struct{ sends int }
 
+func (e *fixtureEngine) RestoreSession(context.Context) error             { return nil }
 func (e *fixtureEngine) Start(context.Context, engine.Policy, bool) error { return nil }
 func (e *fixtureEngine) Stop(context.Context) error                       { return nil }
+func (e *fixtureEngine) Logout(context.Context) error                     { return nil }
 func (e *fixtureEngine) Status() engine.Status                            { return engine.Status{Status: "ready"} }
 func (e *fixtureEngine) Catalog(context.Context) ([]engine.Chat, error) {
 	return []engine.Chat{{ID: "123@s.whatsapp.net", Name: "Work"}, {ID: "999@s.whatsapp.net", Name: "Family"}}, nil
@@ -214,7 +216,7 @@ func TestCheckpointAndCachedAttachmentRecheckCurrentScope(t *testing.T) {
 	json.Unmarshal(ctl("POST", "/pairing", `{"name":"Fixture","client":"stdio"}`).Body.Bytes(), &invite)
 	var grant map[string]string
 	json.Unmarshal(ctl("POST", "/pairing/redeem", `{"token":"`+invite["token"].(string)+`"}`).Body.Bytes(), &grant)
-	pub := s.PublicHandler()
+	pub := s.LocalHandler()
 	call := func(name string, args map[string]any) map[string]any {
 		body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
 		r := httptest.NewRequest("POST", "/mcp", bytes.NewReader(body))

@@ -31,7 +31,68 @@ type Engine struct {
 func New(binary, dir string) *Engine {
 	return &Engine{binary: binary, dir: dir, status: Status{Status: "disconnected", Detail: "Connect WhatsApp to import available history."}}
 }
-func (e *Engine) Status() Status { e.mu.Lock(); defer e.mu.Unlock(); return e.status }
+
+// RestoreSession reads upstream-owned authentication before the service publishes
+// its first state. Link intent alone does not prove that a QR was ever scanned.
+// It performs no WhatsApp network work and is called before starting the writer.
+func (e *Engine) RestoreSession(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cancel != nil {
+		return errors.New("stop WhatsApp sync before checking the saved session")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	authenticated, err := e.sessionAuthenticated(ctx)
+	if err != nil {
+		return errors.New("the saved WhatsApp session could not be checked; check its file permissions and reopen the app")
+	}
+	e.status.Linked = authenticated
+	e.status.QR = ""
+	if authenticated {
+		e.status.Status = "connecting"
+		e.status.Detail = "Reconnecting to WhatsApp using the saved session."
+	}
+	return nil
+}
+
+func (e *Engine) sessionAuthenticated(ctx context.Context) (bool, error) {
+	raw, err := e.Call(ctx, false, "auth", "status")
+	var status struct {
+		Authenticated *bool `json:"authenticated"`
+	}
+	if err != nil || json.Unmarshal(raw, &status) != nil || status.Authenticated == nil {
+		return false, errors.New("the saved WhatsApp session could not be checked")
+	}
+	return *status.Authenticated, nil
+}
+func (e *Engine) Status() Status {
+	e.mu.Lock()
+	status := e.status
+	e.mu.Unlock()
+	status.LastSyncedAt = e.lastSuccessfulSync()
+	return status
+}
+
+// Read the engine's persisted successful-sync marker rather than treating a
+// connection, history-start event, or process heartbeat as a completed sync.
+func (e *Engine) lastSuccessfulSync() string {
+	u := url.URL{Scheme: "file", Path: filepath.Join(e.dir, "store", "wacli.db")}
+	db, err := sql.Open("sqlite3", u.String()+"?mode=ro&_query_only=true&_busy_timeout=50")
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var timestamp sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT last_sync_at FROM retrieval_state WHERE id=1`).Scan(&timestamp); err != nil || !timestamp.Valid || timestamp.Int64 <= 0 {
+		return ""
+	}
+	return time.Unix(timestamp.Int64, 0).UTC().Format(time.RFC3339)
+}
+
 func (e *Engine) args(args ...string) []string {
 	return append([]string{"--store", filepath.Join(e.dir, "store"), "--content-policy", filepath.Join(e.dir, "content-policy.json")}, args...)
 }
@@ -51,6 +112,7 @@ func (e *Engine) Start(ctx context.Context, p Policy, link bool) error {
 	e.done = done
 	e.status.Status = "connecting"
 	e.status.Detail = "Starting WhatsApp and applying saved chat scope."
+	e.status.QR = ""
 	e.mu.Unlock()
 	ack := make(chan error, 1)
 	go e.run(runCtx, done, p, link, ack)
@@ -93,6 +155,36 @@ func (e *Engine) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return errors.New("waiting for the WhatsApp writer to stop; chat scope remains blocked")
 	}
+}
+
+// Logout invalidates the linked-device session without deleting the archive.
+// The service stops and awaits the owned writer before entering this method.
+func (e *Engine) Logout(ctx context.Context) error {
+	e.mu.Lock()
+	running := e.cancel != nil
+	e.mu.Unlock()
+	if running {
+		return errors.New("stop WhatsApp sync before disconnecting")
+	}
+	// Upstream logout requires an authenticated session. A read-only status check
+	// makes retry safe after a successful logout whose response was interrupted.
+	authenticated, err := e.sessionAuthenticated(ctx)
+	if err != nil {
+		return errors.New("could not check the WhatsApp session; retry Disconnect")
+	}
+	if authenticated {
+		raw, err := e.Call(ctx, true, "auth", "logout")
+		var result struct {
+			LoggedOut bool `json:"logged_out"`
+		}
+		if err != nil || json.Unmarshal(raw, &result) != nil || !result.LoggedOut {
+			return errors.New("WhatsApp could not sign out this linked device. Check your connection and retry Disconnect")
+		}
+	}
+	e.mu.Lock()
+	e.status = Status{Status: "disconnected", Detail: "WhatsApp is disconnected. Your archive stays on this Mac."}
+	e.mu.Unlock()
+	return nil
 }
 func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link bool, ack chan error) {
 	defer close(done)
@@ -182,6 +274,7 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 				case "qr_code":
 					e.status.Status = "linking"
 					e.status.QR = event.Data.Code
+					e.status.Linked = false
 					e.status.Detail = "Scan this code using WhatsApp Linked Devices."
 				case "connected":
 					e.status.Status = "ready"
@@ -196,6 +289,7 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 					e.status.Detail = "Receiving WhatsApp updates. Available history may still arrive."
 				case "disconnected":
 					e.status.Status = "connecting"
+					e.status.QR = ""
 					e.status.Detail = "Reconnecting to WhatsApp."
 				case "logged_out":
 					e.status.Status = "attention"
@@ -231,6 +325,7 @@ func (e *Engine) setAttention(detail string) {
 	e.mu.Lock()
 	e.status.Status = "attention"
 	e.status.Detail = detail
+	e.status.QR = ""
 	e.mu.Unlock()
 }
 
@@ -267,6 +362,8 @@ func (e *Engine) Call(ctx context.Context, write bool, args ...string) (json.Raw
 	if runErr != nil || parseErr != nil || !env.Success {
 		detail := strings.ToLower(env.Error + stderr.String())
 		switch {
+		case strings.Contains(detail, "media_not_cached"):
+			return nil, errors.New("attachment_not_cached: WhatsApp is disconnected and this attachment is not cached; connect WhatsApp to download it")
 		case strings.Contains(detail, "checkpoint") && (strings.Contains(detail, "expir") || strings.Contains(detail, "retention")):
 			return nil, errors.New("checkpoint_expired: capture a new checkpoint, rebuild from the retained archive, then replay changes; the expired gap cannot be recovered")
 		case strings.Contains(detail, "cursor"):

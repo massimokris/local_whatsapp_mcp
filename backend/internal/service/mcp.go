@@ -219,6 +219,17 @@ func toolResult(out any, err error) (*mcp.CallToolResult, error) {
 }
 func register[In any](srv *mcp.Server, name, description string, fn func(context.Context, In) (any, error)) {
 	mcp.AddTool(srv, &mcp.Tool{Name: name, Description: description}, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+		if operation, ok := ctx.Value(operationContextKey{}).(context.Context); ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
+			defer cancel()
+			stop := context.AfterFunc(operation, cancel)
+			defer stop()
+			if err := operation.Err(); err != nil {
+				r, e := toolResult(nil, err)
+				return r, nil, e
+			}
+		}
 		out, err := fn(ctx, in)
 		r, e := toolResult(out, err)
 		return r, nil, e
@@ -249,10 +260,7 @@ func (s *Service) mcpHandler() http.Handler {
 		if err != nil {
 			return nil, err
 		}
-		status := engine.Status{Status: "disconnected"}
-		if s.opt.Engine != nil {
-			status = s.opt.Engine.Status()
-		}
+		status := s.State()["whatsapp"].(engine.Status)
 		status.QR = ""
 		return map[string]any{"whatsapp": status, "scope_revision": p.Revision, "history_notice": historyNotice}, s.finish(ctx, p)
 	})

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"github.com/massi/localwhatsappmcp/internal/engine"
 	"github.com/massi/localwhatsappmcp/internal/service"
-	"github.com/massi/localwhatsappmcp/internal/setup"
 	"io"
 	"net"
 	"net/http"
@@ -19,9 +18,6 @@ import (
 	"syscall"
 	"time"
 )
-
-var extensionFactory func(*service.Service) (service.Extension, error)
-var extraCommand func([]string) error
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -41,7 +37,7 @@ func defaultDir() string {
 }
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: localwhatsappmcp serve|control|setup|headers|doctor|stdio")
+		return errors.New("usage: localwhatsappmcp serve|control")
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -49,7 +45,6 @@ func run(args []string) error {
 	switch args[0] {
 	case "serve":
 		binary := fs.String("wacli", "", "bundled WhatsApp engine")
-		helper := fs.String("helper", "", "bundled setup helper")
 		listen := fs.String("listen", "127.0.0.1:32191", "loopback MCP address")
 		ownerStdin := fs.Bool("owner-stdin", false, "stop when the owning app closes stdin")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -58,15 +53,12 @@ func run(args []string) error {
 		if *binary == "" {
 			return errors.New("--wacli is required")
 		}
-		if *helper == "" {
-			*helper, _ = os.Executable()
-		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		if *ownerStdin {
 			go func() { _, _ = io.Copy(io.Discard, os.Stdin); cancel() }()
 		}
-		return serve(ctx, service.Options{DataDir: *dir, HelperPath: *helper, ExtensionFactory: extensionFactory}, *binary, *listen)
+		return serve(ctx, service.Options{DataDir: *dir}, *binary, *listen)
 	case "control":
 		method := fs.String("method", "GET", "")
 		path := fs.String("path", "/state", "")
@@ -84,72 +76,14 @@ func run(args []string) error {
 				b = []byte("{}")
 			}
 		}
-		out, err := setup.Control(context.Background(), *dir, *method, *path, b)
+		out, err := controlRequest(context.Background(), *dir, *method, *path, b)
 		if err != nil {
 			return err
 		}
 		_, err = os.Stdout.Write(append(out, '\n'))
 		return err
-	case "setup":
-		client := fs.String("client", "codex", "")
-		tokenStdin := fs.Bool("token-stdin", false, "")
-		resume := fs.String("resume", "", "")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		var token string
-		if *resume == "" {
-			if !*tokenStdin {
-				return errors.New("provide the pairing token privately with --token-stdin")
-			}
-			b, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
-			if err != nil {
-				return err
-			}
-			token = strings.TrimSpace(string(b))
-		}
-		helper, _ := os.Executable()
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		defer cancel()
-		c, err := setup.Install(ctx, *dir, helper, *client, token, *resume)
-		if err != nil {
-			return err
-		}
-		out := map[string]string{"status": "installed_and_verified", "connection_id": c.ID, "client": c.Client, "note": "Reload the client's MCP configuration. Sending starts disabled."}
-		if c.Client == "stdio" {
-			out["command"] = setup.Quote(helper) + " stdio --data-dir " + setup.Quote(*dir) + " --connection " + setup.Quote(c.ID)
-		}
-		return json.NewEncoder(os.Stdout).Encode(out)
-	case "headers", "doctor", "stdio":
-		id := fs.String("connection", "", "")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if *id == "" {
-			return errors.New("--connection is required")
-		}
-		switch args[0] {
-		case "headers":
-			out, err := setup.Headers(*dir, *id)
-			if err != nil {
-				return err
-			}
-			return json.NewEncoder(os.Stdout).Encode(out)
-		case "stdio":
-			return setup.Stdio(context.Background(), *dir, *id)
-		default:
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := setup.Doctor(ctx, *dir, *id); err != nil {
-				return err
-			}
-			return json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "verified", "connection_id": *id, "transport": "Streamable HTTP", "credential": "macOS Keychain"})
-		}
 	default:
-		if extraCommand != nil {
-			return extraCommand(args)
-		}
-		return errors.New("unknown helper command")
+		return errors.New("unknown service command")
 	}
 }
 func serve(parent context.Context, options service.Options, binary, address string) error {
@@ -203,12 +137,12 @@ func serve(parent context.Context, options service.Options, binary, address stri
 	if err = os.Chmod(socket, 0600); err != nil {
 		return err
 	}
-	public := &http.Server{Handler: s.PublicHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	local := &http.Server{Handler: s.LocalHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	private := &http.Server{Handler: s.ControlHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	failures := make(chan error, 2)
-	go func() { failures <- public.Serve(tcp) }()
+	go func() { failures <- local.Serve(tcp) }()
 	go func() { failures <- private.Serve(unix) }()
 	go func() { _ = s.Resume(ctx, false) }()
 	select {
@@ -222,7 +156,7 @@ func serve(parent context.Context, options service.Options, binary, address stri
 	_ = s.Close()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	public.Shutdown(shutdown)
+	local.Shutdown(shutdown)
 	private.Shutdown(shutdown)
 	return err
 }
@@ -258,8 +192,8 @@ func startupErrorCode(err error) string {
 		return "configuration_missing"
 	case strings.Contains(detail, "saved configuration is invalid"), strings.Contains(detail, "saved chat scope is invalid"):
 		return "configuration_invalid"
-	case strings.Contains(detail, "Keychain"):
-		return "keychain_unavailable"
+	case errors.Is(err, service.ErrCredentials):
+		return "credentials_unavailable"
 	case strings.Contains(detail, "port is in use"):
 		return "port_in_use"
 	case strings.Contains(detail, "service is already running"):
