@@ -9,7 +9,7 @@ swift build -c release --package-path native
 
 A complete app bundle supplies `Contents/Helpers/localwhatsappmcp` and `Contents/Helpers/wacli`. The executable communicates with the private service through the bundled service/control executable, using the contract in [interfaces.md](../docs/implementation/interfaces.md). The service owns a loopback-only MCP endpoint; the UI exposes WhatsApp connection, chat selection, local MCP status, agent setup/management, and minimal settings. Running the bare executable without the bundled service and engine is only useful for the demo preview.
 
-Initial onboarding follows **Link WhatsApp → Choose chats → Connect your agent**. The [specification](../SPEC.md) defines routing, connection management, credentials, and lifecycle behavior; the [UI reference](../docs/ui-reference.md) defines the native presentation.
+Initial onboarding follows **Link WhatsApp → Choose chats → Connect your agent**.
 
 ## Safe UI preview
 
@@ -23,4 +23,4 @@ Preview pages are `home`, `qr`, `qr-hover`, `initial`, `chats`, and `settings`; 
 
 ## Verification
 
-[Acceptance evidence](../docs/acceptance.md) records native test runs, synthetic renders and interaction checks, and their version boundaries. Demo screenshots do not establish actual WhatsApp linking, client configuration/reload, login-item approval, or sleep/wake compatibility; those remain [live installation checks](../docs/acceptance.md#live-installation-checks).
+Demo screenshots do not establish actual WhatsApp linking, client configuration/reload, login-item approval, or sleep/wake compatibility; those require live installation checks.

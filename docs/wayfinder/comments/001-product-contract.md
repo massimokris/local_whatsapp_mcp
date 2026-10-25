@@ -5,7 +5,7 @@
 - Recorded by: Codex, from the user's explicit answers and corrections in the originating conversation
 - Result: closed; agreement captured, implementation not started
 
-The user approved the product behavior now expressed as the acceptance contract in [SPEC.md](../../../SPEC.md). In particular, they corrected the proposed selection-before-import flow: initial connection saves all received history immediately, then confirmed chat scope governs further storage and all agent access. Initial unselected records may remain stored but cannot be retrieved through MCP.
+The user corrected the proposed selection-before-import flow: initial connection saves all received history immediately, then confirmed chat scope governs further storage and all agent access. Initial unselected records may remain stored but cannot be retrieved through MCP.
 
 The conversation established local-agent users as the first audience; simultaneous independent agent connections; shared chat scope; sending text/attachments only after a per-agent opt-in; normal sleep; on-demand media; and a background menu bar app that launches at login. Editing, deleting, and group administration were explicitly removed from v1.
 
@@ -17,7 +17,7 @@ No additional product question is currently blocking. The two research children 
 
 ## Local-only revision — 2026-10-23
 
-The user explicitly removed external HTTP exposure for the current product and requested that WhatsApp connection lead to a local MCP server. This supersedes the optional cloud/tunnel portions of the agreement above. The current [specification](../../../SPEC.md) keeps the native app, WhatsApp linking and capture, confirmed chat scope, and MCP service on this Mac, with no public endpoint, provider setup, tunnel management, hosted-client OAuth, or browser callback flow.
+The user explicitly removed external HTTP exposure for the current product and requested that WhatsApp connection lead to a local MCP server. This supersedes the optional cloud/tunnel portions of the agreement above. The revised agreement keeps the native app, WhatsApp linking and capture, confirmed chat scope, and MCP service on this Mac, with no public endpoint, provider setup, tunnel management, hosted-client OAuth, or browser callback flow.
 
 Local loopback HTTP remains the MCP transport, with the bundled stdio bridge for clients that need it. Pairing remains a short-lived, single-use invitation: the helper privately installs each local agent's durable credential in Keychain. That preserves independent revocation and initially disabled sending permission without manual authentication configuration. Starting the service is automatic; agent content access still waits for confirmed scope and pairing.
 
@@ -25,4 +25,4 @@ Earlier cloud research, implementation resolutions, and build evidence are histo
 
 ## Current native UI scope — 2026-10-23
 
-The [updated UI reference](../../ui-reference.md#current-ui-scope) records the user's subsequent direction to keep the interface focused on WhatsApp and defer agent setup and management until a replacement flow is defined. The dark screenshots supersede the earlier Dock styling. This narrows the current native surfaces; local MCP, chat-scope enforcement, and existing agent credentials remain backend responsibilities. The helper pairing contract is retained without claiming that its former native setup screens remain available.
+The user subsequently directed the interface to focus on WhatsApp and defer agent setup and management until a replacement flow is defined. The dark screenshots supersede the earlier Dock styling. This narrows the native surfaces at this point in the history; local MCP, chat-scope enforcement, and existing agent credentials remain backend responsibilities. The helper pairing contract is retained without claiming that its former native setup screens remain available.

@@ -8,7 +8,7 @@
 
 ## Destination
 
-An implementation-ready [LocalWhatsAppMCP v1 specification](../../SPEC.md) that preserves the agreed experience, with concrete integration decisions for selective storage and agent pairing. Building and shipping the app is a subsequent effort.
+Implementation-ready decisions for LocalWhatsAppMCP v1 that preserve the agreed experience, with concrete integration routes for selective storage and agent pairing. Building and shipping the app is a subsequent effort.
 
 ## Notes
 
@@ -16,7 +16,7 @@ An implementation-ready [LocalWhatsAppMCP v1 specification](../../SPEC.md) that 
 - Use the local Markdown tracker and its [Wayfinding operations](../agents/issue-tracker.md#wayfinding-operations). Open children are found from ticket metadata, not duplicated in this index.
 - Use the wayfinder skill for map work, research for external facts, and domain-modeling when terminology changes. Use grilling only when evidence exposes a consequential user decision; routine integration details belong to the implementer.
 - Keep the user experience fixed: QR connection, immediate initial capture, configurable chat scope, copyable agent setup instructions with a one-time pairing token, per-agent sending opt-in, and local MCP access. The user removed external exposure in the [local-only revision](comments/001-product-contract.md#local-only-revision--2026-10-23).
-- The [current UI reference](../ui-reference.md) uses the user's dark screenshots and includes WhatsApp plus local MCP connection setup and management. The public app name is **LocalWhatsAppMCP** and the project folder is **local_whatsapp_mcp**.
+- The user chose dark screenshots as the visual direction for WhatsApp and local MCP connection setup and management. The public app name is **LocalWhatsAppMCP** and the project folder is **local_whatsapp_mcp**.
 - Research notes live in `docs/research/`; their tickets record the isolated research branch and source evidence. Research establishes implementation direction, not a claim of tested client compatibility.
 
 ## Decisions so far
@@ -32,7 +32,7 @@ No additional product area currently needs discovery. If the integration researc
 
 ## Out of scope
 
-- Building or shipping the application in this map; the destination is a specification and clear integration route.
+- Building or shipping the application in this map; the destination is settled decisions and a clear integration route.
 - Agent editing/deleting of messages and group administration, explicitly removed from v1.
 - An in-app AI assistant, scheduler, or task-extraction engine; the connected agent owns those workflows.
 - External HTTP exposure, tunnel/provider setup, hosted-agent OAuth, hosted WhatsApp storage, and an always-on cloud worker.

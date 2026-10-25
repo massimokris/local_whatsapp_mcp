@@ -1,12 +1,12 @@
 # Distribution and acceptance resolution
 
-2026-10-23: Initial integration is built and packaged. Independent Standards and Spec reviews are retained in the [review report](../reviews/2026-10-23.md). The single review-fix implementer is repairing those findings before final packaging.
+2026-10-23: Initial integration is built and packaged. Independent Standards and behavior reviews are retained in the [review report](../reviews/2026-10-23.md). The single review-fix implementer is repairing those findings before final packaging.
 
-Final merge, test, package, and cleanup evidence will be appended when completed. [Installation acceptance](../../acceptance.md) distinguishes deterministic checks from live-account verification.
+Final merge, test, package, and cleanup evidence will be appended when completed. Deterministic checks do not establish live-account compatibility.
 
 ## Completed — 2026-10-23
 
-All implementation tasks are closed on `codex/localwhatsappmcp-integration`. The final runtime source snapshot is **`7d003a430d599049fd2ea229da789aef98eb37b2`**, clean when packaged; later commits only record this verification. Review repairs were implemented by one agent in `7ad3140` and merged by a separate merger in `c6de190`. The focused Spec recheck confirmed all three original findings resolved with no material regression.
+All implementation tasks are closed on `codex/localwhatsappmcp-integration`. The final runtime source snapshot is **`7d003a430d599049fd2ea229da789aef98eb37b2`**, clean when packaged; later commits only record this verification. Review repairs were implemented by one agent in `7ad3140` and merged by a separate merger in `c6de190`. The focused behavior recheck confirmed all three original findings resolved with no material regression.
 
 Final checks on **macOS 26.5.2 / arm64**:
 
@@ -26,4 +26,4 @@ Deliverables under the ignored `dist/` directory:
 
 The complete `LocalWhatsAppMCP.app` is also available there. Its bundled wacli SHA256 is `7ff6f23ee20bbe473d070c84f14ae3e51f190d55cd35c700426e4089e33e28ee`. `Contents/Resources/BuildInfo.txt` records source/toolchain/pin details. Local evidence remains in ignored `build/final-test.log`, `build/final-package.log`, `build/final-smoke.log`, `build/final-qr-smoke.log`, `build/final-artifact-qa.log`, and `build/final-demo.png`; earlier native previews were preserved under `build/native-previews/`.
 
-The app is ready for local installation and account testing. It is **ad-hoc signed**, not Developer ID signed or notarized. Real QR scanning/history ingestion, phone media recovery, user-client configuration reload, provider login/DNS/hosted OAuth, OS login-item approval, and sleep/wake with a linked account remain the explicit [live installation checks](../../acceptance.md#live-installation-checks). Intel and a full macOS-version matrix were not tested. These limits do not change the accepted product contract or claim universal compatibility.
+The app is ready for local installation and account testing. It is **ad-hoc signed**, not Developer ID signed or notarized. Real QR scanning/history ingestion, phone media recovery, user-client configuration reload, provider login/DNS/hosted OAuth, OS login-item approval, and sleep/wake with a linked account were not verified. Intel and a full macOS-version matrix were not tested. These limits do not change the accepted product behavior or claim universal compatibility.

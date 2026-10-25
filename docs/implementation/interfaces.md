@@ -1,6 +1,6 @@
 # Component interfaces
 
-These are internal engineering contracts for concurrent implementation. Product behavior remains in [SPEC.md](../../SPEC.md).
+These are the integration contracts between the native app, local service, and pinned engine.
 
 ## Layout and binaries
 

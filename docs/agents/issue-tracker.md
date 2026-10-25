@@ -1,8 +1,7 @@
 # Issue tracker: Local Markdown
 
-This project keeps its specification and decision tracker inside `local_whatsapp_mcp`. These are local project artifacts; writing them publishes to this tracker only. No external issue service is required.
+This project keeps its decision and implementation tracker inside `local_whatsapp_mcp`. These are local project artifacts; writing them publishes to this tracker only. No external issue service is required.
 
-- Product contract: [SPEC.md](../../SPEC.md).
 - Canonical map issue: [LocalWhatsAppMCP v1 decision map](../wayfinder/map.md).
 - One decision issue per file in `docs/wayfinder/issues/`.
 - Resolution comments in `docs/wayfinder/comments/`; research assets in `docs/research/`.
@@ -51,4 +50,4 @@ Use an isolated `research/<name>` branch/worktree for external investigation. Re
 
 Wayfinder tickets resolve decisions; application implementation tasks belong to a later execution plan. If an issue lies outside this map's destination, close it with a scope explanation and link it under Out of scope rather than Decisions so far.
 
-Close the map when its specified questions are answered and the specification provides a clear implementation route. A closed map means planning is complete, not that the app exists or has passed acceptance checks. If facts later invalidate a decision, preserve the prior comment and record a superseding decision before changing the contract.
+Close the map when its questions are answered and the recorded decisions provide a clear implementation route. A closed map means planning is complete, not that the app exists or has passed acceptance checks. If facts later invalidate a decision, preserve the prior comment and record a superseding decision.
