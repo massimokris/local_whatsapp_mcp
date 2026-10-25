@@ -1,7 +1,7 @@
 # Agent pairing and cloud connection
 
 Date: 2026-10-23. Research for [Preserve one-time pairing across MCP client connections](../wayfinder/issues/003-agent-pairing.md).
-Status: architecture recommendation supported by documentation; no integration tests performed.
+Status: historical architecture research supported by documentation; no integration tests performed for this note. The [local-only revision](../wayfinder/comments/001-product-contract.md#local-only-revision--2026-10-23) supersedes its cloud/provider/OAuth recommendations. The [SQLite credential revision](../wayfinder/comments/003-agent-pairing.md#sqlite-credential-revision--2026-10-23) supersedes Keychain storage, and the [generic HTTP pairing revision](../wayfinder/comments/003-agent-pairing.md#generic-http-pairing-revision--2026-10-24) supersedes the client-specific installer, private redemption, credential-header helper, and stdio bridge below. Current setup uses generic instructions and a temporary code exchanged over loopback HTTP; each agent configures its own client. The following research is retained as decision history. The current [specification](../../SPEC.md) and [component interfaces](../implementation/interfaces.md#local-mcp-boundary) are authoritative.
 
 ## Answer
 

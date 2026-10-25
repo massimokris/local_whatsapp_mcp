@@ -2,9 +2,9 @@
 
 ## Overview
 
-LocalWhatsAppMCP is a native macOS menu bar app that connects the user's WhatsApp to multiple local or cloud agents through MCP. The app owns sync, storage, chat scope, and access; the chosen agents own reasoning, schedules, and notifications.
+LocalWhatsAppMCP is a native macOS menu bar app that connects the user's WhatsApp to multiple agents running on the same Mac through local MCP. The app owns sync, storage, chat scope, and access; the chosen agents own reasoning, schedules, and notifications.
 
-The implementation uses SwiftUI/AppKit in `native/`, the Go MCP service and setup helper in `backend/`, and a pinned wacli patch in `vendor/wacli/`. SQLite/FTS5 stores the archive; optional ngrok/cloudflared provides cloud access. The specification and local trackers retain the accepted contract and decision history.
+The implementation uses SwiftUI/AppKit in `native/`, the Go MCP service and private app control in `backend/`, and a pinned wacli patch in `vendor/wacli/`. SQLite/FTS5 stores the archive. MCP binds only to loopback; public HTTP exposure, tunnels, and cloud OAuth are outside the current scope. The specification and local trackers retain the accepted contract and decision history.
 
 ## Read before changing
 
@@ -12,7 +12,7 @@ The implementation uses SwiftUI/AppKit in `native/`, the Go MCP service and setu
 | --- | --- |
 | Product behavior, onboarding, access, or scope | [Specification](SPEC.md) for the accepted contract and acceptance scenarios. |
 | Domain terminology | [Domain language](CONTEXT.md) for distinctions between WhatsApp linking, agent pairing, chat scope, and archive contents. |
-| UI, interaction, copy, or accessibility | [UI reference](docs/ui-reference.md) for the Dock source references and adaptation rules. |
+| UI, interaction, copy, or accessibility | [UI reference](docs/ui-reference.md) for the current screenshot references and UI scope. |
 | WhatsApp ingestion or archive access | [Selective-storage research](docs/research/selective-storage.md) for upstream insertion points and required policy coverage. |
 | MCP authentication or agent installation | [Agent-pairing research](docs/research/agent-pairing.md) for client capabilities and the fixed setup experience. |
 | Process ownership, native/service integration, or engine JSON | [Component interfaces](docs/implementation/interfaces.md) and [engine integration](vendor/wacli/README.md). |
@@ -26,7 +26,7 @@ The implementation uses SwiftUI/AppKit in `native/`, the Go MCP service and setu
 - Enforce chat scope and per-agent sending permission in server code on every content/action path. Use specific MCP operations rather than unrestricted CLI execution.
 - Keep the wacli patch focused on required integration behavior. Preserve the documented JSON/events boundary and let wacli own its WhatsApp connection/store writes.
 - Store operational state and private media in the application's data directory. Keep real account data and secrets out of source files, logs, and fixtures.
-- Follow Dock's visual language, using the reference guide rather than inheriting unrelated Ratio behavior or fixed screen dimensions.
+- Follow the dark screenshot visual language in the reference guide. Keep WhatsApp linking and local MCP pairing distinct; expose local connection status, setup, and per-agent access controls.
 
 ## Coding standards
 
@@ -41,7 +41,7 @@ Run from the project root on macOS:
 - `./scripts/test.sh`: native tests, backend race tests/vet, engine suites with and without FTS5, and packaging checks.
 - `./scripts/build.sh`: build and verify the native app with bundled Go service and pinned engine.
 - `./scripts/package.sh`: build, verify, and package the app as DMG/ZIP with checksums.
-- `python3 ./scripts/smoke-bundle.py dist/LocalWhatsAppMCP.app`: exercise the actual bundle using synthetic data and temporary Keychain entries, with no WhatsApp login.
+- `python3 ./scripts/smoke-bundle.py dist/LocalWhatsAppMCP.app`: exercise the actual bundle using synthetic data and a temporary local credential database, with no WhatsApp login.
 
 Use [the build guide](docs/building.md) for toolchain, architecture, signing, and targeted commands. Ad-hoc package verification does not establish Developer ID notarization or runtime compatibility on an untested Mac.
 

@@ -7,7 +7,7 @@
 - Parent: [LocalWhatsAppMCP v1 decision map](../map.md)
 - Assignee: massi
 - Blocked by: none
-- Resolution: [Conversation agreement](../comments/001-product-contract.md)
+- Resolution: [Conversation agreement and revisions](../comments/001-product-contract.md)
 
 ## Question
 

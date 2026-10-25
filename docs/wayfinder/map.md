@@ -15,16 +15,16 @@ An implementation-ready [LocalWhatsAppMCP v1 specification](../../SPEC.md) that 
 - The live conversation established the product requirements and stack. [Define the v1 product contract](issues/001-product-contract.md) records that existing agreement; this charting session does not reopen it.
 - Use the local Markdown tracker and its [Wayfinding operations](../agents/issue-tracker.md#wayfinding-operations). Open children are found from ticket metadata, not duplicated in this index.
 - Use the wayfinder skill for map work, research for external facts, and domain-modeling when terminology changes. Use grilling only when evidence exposes a consequential user decision; routine integration details belong to the implementer.
-- Keep the user experience fixed: QR connection, immediate initial capture, configurable chat scope, copyable agent setup instructions with a one-time pairing token, per-agent sending opt-in, and optional agent-configured cloud access.
-- [Dock is the UI reference](../ui-reference.md). The public app name is **LocalWhatsAppMCP** and the project folder is **local_whatsapp_mcp**.
+- Keep the user experience fixed: QR connection, immediate initial capture, configurable chat scope, copyable agent setup instructions with a one-time pairing token, per-agent sending opt-in, and local MCP access. The user removed external exposure in the [local-only revision](comments/001-product-contract.md#local-only-revision--2026-10-23).
+- The [current UI reference](../ui-reference.md) uses the user's dark screenshots and includes WhatsApp plus local MCP connection setup and management. The public app name is **LocalWhatsAppMCP** and the project folder is **local_whatsapp_mcp**.
 - Research notes live in `docs/research/`; their tickets record the isolated research branch and source evidence. Research establishes implementation direction, not a claim of tested client compatibility.
 
 ## Decisions so far
 
-- [Define the v1 product contract](issues/001-product-contract.md) — the conversation settled the v1 experience, access boundaries, operating behavior, stack, and visual reference.
+- [Define the v1 product contract](issues/001-product-contract.md) — the conversation settled the experience, access boundaries, operating behavior, stack, and visual reference; the later local-only revision removes cloud access for now, and the current native UI includes WhatsApp and restored local MCP connection setup.
 - [Enforce selected chats across ingestion and MCP access](issues/002-selective-storage.md) — keep a narrow policy patch inside wacli and independent per-request access checks in the Go wrapper; the research identifies write paths, side effects, identity handling, and the policy transition.
 
-- [Preserve one-time pairing across MCP client connections](issues/003-agent-pairing.md) — local helper/Keychain installation and a grant-bound browser handoff preserve the fixed setup experience; provider credential import has a concrete private route. Live client/provider checks remain explicit.
+- [Preserve one-time pairing across MCP client connections](issues/003-agent-pairing.md) — the [generic HTTP pairing revision](comments/003-agent-pairing.md#generic-http-pairing-revision--2026-10-24) replaces client installers with temporary codes exchanged over loopback HTTP; each agent saves its token and configures its own client. The [MCP connection UI simplification](comments/003-agent-pairing.md#mcp-connection-ui-simplification--2026-10-24) adds one-action instruction copying, inline manual credentials, automatic names, and expandable connection cards. Private credential retrieval supports both paired and manual connections. Prior helper and cloud designs remain historical evidence; actual client checks remain explicit.
 
 ## Not yet specified
 
@@ -35,5 +35,5 @@ No additional product area currently needs discovery. If the integration researc
 - Building or shipping the application in this map; the destination is a specification and clear integration route.
 - Agent editing/deleting of messages and group administration, explicitly removed from v1.
 - An in-app AI assistant, scheduler, or task-extraction engine; the connected agent owns those workflows.
-- Hosted WhatsApp storage or an always-on cloud worker; cloud access tunnels to the running Mac.
+- External HTTP exposure, tunnel/provider setup, hosted-agent OAuth, hosted WhatsApp storage, and an always-on cloud worker.
 - Guaranteed complete historical recovery or unconditional compatibility with every named agent product.

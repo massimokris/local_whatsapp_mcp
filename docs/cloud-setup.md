@@ -1,4 +1,6 @@
-# Optional hosted-agent connection
+# Historical hosted-agent connection
+
+**Archived on 2026-10-23:** the [local-only revision](wayfinder/comments/001-product-contract.md#local-only-revision--2026-10-23) removed cloud access. The setup flow below describes the earlier implementation and must not be used with the current app. Follow [local installation](acceptance.md#install-and-first-use) instead. This document preserves the prior decision and integration evidence.
 
 Local access works without a tunnel or provider account. To connect a hosted agent, confirm chat scope, choose **Connect cloud agent**, select **ngrok** (default) or **Cloudflare Tunnel**, and give the generated instructions to your local agent. The instructions contain a ten-minute, single-use setup invitation. A stable public hostname and the chosen provider's account capabilities are required.
 
@@ -24,6 +26,6 @@ The native URL scheme is reserved and validated, but an unsolicited callback can
 
 ## Evidence and limits
 
-Implementation: [cloud service](../backend/internal/cloud/extension.go), [OAuth flow](../backend/internal/cloud/oauth_flow.go), [provider helper](../backend/cmd/localwhatsappmcp/cloud.go). Deterministic tests exercise the complete authorization flow, expiry/replay, restart, and revocation, with synthetic clients/providers. These tests do not authenticate a real provider account, establish DNS, or reload a live hosted client.
+Historical implementation paths, removed by the local-only revision: `backend/internal/cloud/extension.go`, `backend/internal/cloud/oauth_flow.go`, and `backend/cmd/localwhatsappmcp/cloud.go`. The original implementation was integrated through `15d636a`; final review repairs are recorded in the [cloud resolution](implementation/comments/104-cloud.md). Deterministic tests exercise the complete authorization flow, expiry/replay, restart, and revocation, with synthetic clients/providers. These tests do not authenticate a real provider account, establish DNS, or reload a live hosted client.
 
 Primary client contracts consulted on 2026-10-23 include [OpenAI's plugin authentication documentation](https://developers.openai.com/plugins/build/auth) and [ChatGPT's OAuth client metadata](https://chatgpt.com/oauth/client.json). The earlier [pairing research](research/agent-pairing.md) preserves its original evidence and limits; its unresolved mechanisms are resolved by this concrete helper/handoff implementation, with live acceptance still explicit.

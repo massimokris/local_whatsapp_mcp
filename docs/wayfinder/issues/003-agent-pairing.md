@@ -9,7 +9,7 @@
 - Blocked by: [Define the v1 product contract](001-product-contract.md)
 - Research branch: `research/local-whatsapp-mcp-pairing`
 - Research asset: [Agent-pairing integration](../../research/agent-pairing.md)
-- Latest comment: [Implementation resolution and remaining live checks](../comments/003-agent-pairing.md#implementation-resolution--2026-10-23)
+- Latest comment: [MCP connection UI simplification](../comments/003-agent-pairing.md#mcp-connection-ui-simplification--2026-10-24)
 
 ## Question
 

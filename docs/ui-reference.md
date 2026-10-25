@@ -1,106 +1,84 @@
 # LocalWhatsAppMCP UI reference
 
-Read this when shaping screens, implementing native views, changing copy, or reviewing UI. The user chose `/Users/massi/development/dock` as the visual reference. This document records observed source and its intended adaptation; LocalWhatsAppMCP screens have not been implemented or visually verified.
+Read this when changing native screens, interaction, copy, or accessibility. The user's nine dark WhatsApp/network screenshots, supplied on 2026-10-23, supersede the earlier Dock reference. They define visual style; [SPEC.md](../SPEC.md) defines behavior. Verification belongs in [acceptance.md](acceptance.md).
 
-[SPEC.md](../SPEC.md) owns product behavior and scope. The planned surfaces below translate that behavior into UI guidance; exact layouts and recovery copy remain design work.
+## Current UI scope
 
-## Source and scope
+The current interface contains WhatsApp connection/sync, QR linking, chat selection, local MCP connection setup and management, and a small settings screen. The 2026-10-24 MCP revision simplifies setup to copying generic instructions or expanding manual credentials, then manages saved connections in expandable home-style cards. Initial onboarding follows **Link WhatsApp → Choose chats → Connect your agent**, with direct transitions between those existing screens. This routing supersedes the overview and separate scope-mode choice shown between steps in earlier onboarding references. Use the same dark visual system throughout. The local service continues to own authentication and access policy.
 
-The reference app is Open Ratio, a compact SwiftUI interface hosted by AppKit. Its product is unrelated to WhatsApp; transfer its presentation and interaction language, not its activity tracking features.
+The screenshots' iMessage source, contact counts, web network action, and Gigi branding are not features of this app. Their “never reads your messages” claim does not apply to an app that archives WhatsApp messages. Use truthful local-storage copy and actual connection state.
 
-| Reference | Use it for |
+## Visual system
+
+The references are approximately 420 × 750 native points. Use a dark native window, centered SF Pro Semibold headings, system sans serif body text, generous open space, rounded cards, and a white primary action near the bottom. Native titlebar controls replace the earlier menu-bar pointer.
+
+| Element | Treatment |
 | --- | --- |
-| [AGENTS.md](/Users/massi/development/dock/AGENTS.md) | Reference product context and native UI conventions. |
-| [Theme.swift](/Users/massi/development/dock/Sources/RatioNative/Theme.swift) | Adaptive colors, button feedback, and separators. |
-| [RatioTypography.swift](/Users/massi/development/dock/Sources/RatioNative/RatioTypography.swift) | Native fonts, line height, tracking, and text glyphs. |
-| [MenuBarView.swift](/Users/massi/development/dock/Sources/RatioNative/MenuBarView.swift) | Compact rows, persistent status, inline navigation, and footer. |
-| [PreferencesView.swift](/Users/massi/development/dock/Sources/RatioNative/PreferencesView.swift) | Label/control alignment and inline settings. |
-| [RatioNativeApp.swift](/Users/massi/development/dock/Sources/RatioNative/RatioNativeApp.swift) | Menu bar anchor, panel outline, focus, and dismissal. |
+| Background | Subtle dark gradient, blue charcoal near the top and muted plum near the bottom. |
+| Heading | macOS system font (SF Pro), Semibold, 30 pt, with slightly tightened tracking. |
+| Body | System sans serif, 13–14 pt; secondary labels 11–13 pt. |
+| Text | Near-white `#FAF9FC`; secondary gray `#A3A0AD`. |
+| Row cards | WhatsApp, local MCP, agent connections, contact rows, and the Start at Log In card share 17 pt corners, a 7% white fill and a subtle 0.7 pt outline. Contacts and WhatsApp use 12 pt padding; settings uses 16 pt. Unselected contacts use a quieter fill without the outline. |
+| Large cards | QR instructions use charcoal `#2A282F`, 26 pt continuous corners, and a fine fading light border. |
+| Layout | 28 pt horizontal insets; 12–16 pt card padding; about 12 pt between cards. |
+| Primary button | Near-white fill, dark semibold label, 50 pt minimum height, 14 pt corners. |
+| Status | Clear state text; no extra circular status control on the WhatsApp card. Use green for WhatsApp identity/success and the enabled Start at Log In switch, red for errors. |
+| QR tile | White rounded 220 pt tile with a readable QR and quiet zone. Hover or keyboard focus blurs the code and reveals a centered dark refresh icon; activation requests a new code. |
 
-Inspected on 2026-10-23; reference repository HEAD was `07ffdb1`. Recheck these files if the reference changes. No reference implementation was copied.
+Home and settings omit page headings and subtitles. The gear on home and the close/back controls on other pages share the same top-right position, clear of native window controls. The WhatsApp card uses the actual logo supplied by the user, bundled as an image resource, without a redundant circular status indicator. Its collapsed header shows a right chevron. It expands automatically for a linked account to show **Disconnect**, or can be expanded to show **Connect** when disconnected. While WhatsApp is linked and scope is confirmed, put a **Choose connected chats** row inside the expanded card below **Stop syncing WhatsApp**. Match that row's title/subtext/action layout: **X chats connected** below the title and a compact **Choose** button on the right, matching the **Disconnect** button’s width. Use the saved scope's deduplicated identity count, unaffected by chooser drafts; show **Loading connected chats…** while the catalog is unknown. Hide this row during disconnect, after sign-out, and while awaiting QR linking, retaining saved scope for reconnection. The disconnected Connect row subtitle is **Scan a QR code from your phone to link this Mac**, without a trailing period. If the user exits onboarding before confirmation, the overview provides a direct way to reopen **Choose chats**. Keep primary actions on the other screens anchored low on the page. On smaller screens, scroll long content rather than reducing QR size or making text unreadable.
 
-## Observed visual system
+When connected, the WhatsApp card subtitle reads **Synced X minutes ago - X chats connected**, using the last successful sync and confirmed chat scope. Use **Synced just now** for under a minute and **Syncing…** when no completed sync is recorded. Count verified conversation identities once; chooser drafts and searches do not change the count. Omit the count until scope is confirmed and the catalog has loaded. Keep connection, reconnect, and disconnect status visible when those need attention.
 
-Use flat, closely aligned rows, restrained separators, monospaced typography, and small native icons. Content and state supply the hierarchy; the reference has no large decorative headings or nested card layout.
+## Connection and scope
 
-| Token | Light | Dark |
+1. On a fresh launch, wait for the persisted engine session's authentication state before deciding. Without a linked account, go directly to **Connect WhatsApp** and prepare its QR code. A saved linked account resumes **Choose chats** when scope is unconfirmed, or the overview when scope is confirmed, even while sync is starting or transport is reconnecting and when no agent connections remain. Reopening a linked account's window preserves current navigation; reopening without a linked account prepares QR setup. Saved sync intent or a separate first-run flag must not hide a genuinely required QR after sign-out or revocation. Users can exit onboarding and navigate normally at any point, including Settings; background refreshes must respect that choice.
+2. Before linking, show a dedicated **Connect WhatsApp** QR screen with subtitle **Scan the QR code with your phone**, four short phone instructions, the current code, and a waiting/retry state. Step 4 is **Scan the QR code below**, without camera-access subtext. The caption is **Code refreshes automatically**. Hover or keyboard focus reveals the refresh action over the blurred QR; requesting a new code shows loading until it arrives. Automatically rotated codes replace the current one; expired codes are cleared during restart/retry. Once initial linking succeeds, hide the four steps and QR setup controls and automatically open the existing **Choose chats** selector, including its loading state while the catalog arrives. No **Continue** button, overview visit, or separate all-chats-versus-specific-chats screen intervenes.
+3. Initial available history begins arriving before scope confirmation. Keep MCP content access blocked until scope is saved. The selector provides primary **Save selection** and secondary **Continue with all chats**.
+4. Saving initial scope by either action opens **Connect your agent** directly after success; a failed save keeps the selector open with recovery information. Returning users relinking with confirmed scope return to the overview, and later scope changes use **Choose** in its **Choose connected chats** row and return there after saving. Explicitly exiting onboarding or navigating away prevents later refreshes from advancing its route.
+5. Expanding the WhatsApp card exposes **Disconnect**. Confirming signs out the linked device and stops sync while retaining the archive and selected chats. Show progress, disable duplicate requests, and provide **Retry disconnect** if sign-out is unfinished. Background restart and wake leave an intentionally disconnected account offline. Opening the app again prepares a new QR; linking still requires a phone scan. An unfinished disconnect stays on the overview for retry.
+
+All chats includes future conversations. Selected chats is an explicit list. Changing selection stops further storage and access for excluded chats; previously archived messages remain stored. Never imply that selecting chats deletes earlier history or guarantees complete backfill.
+
+## Chat selector
+
+Show direct chats and groups together by recent known activity. Use readable names, phone fallback, and a selection control on the right. Search covers chat/group names, contact names, and phone numbers. **Select all** applies to every matching result, including off-screen results, while retaining selections outside the query. Search changes preserve selection. Show the selected count and meaningful empty states. The page title is **Choose chats**, with subtitle **New messages are saved only for selected chats.** The **Save selection** action has no trailing symbol; **Continue with all chats** remains available below it. Home, chat selection, and QR share the lock note **Your archive stays locally on this Mac.**
+
+On QR and on home when the archive note is the last item, use a single 24 pt bottom inset below it, without stacked page/footer padding. When home has footer actions below the note, preserve the 26 pt gap from the note to those buttons. Other pages keep their existing spacing.
+
+## Local MCP connections
+
+The **Local MCP** card appears only on the overview. It shows the service’s current access state, then opens **Connect your agent** when there are no connections or **Local MCP** when connections exist. Keep server readiness distinct from recent client activity and WhatsApp sync status. Before scope is confirmed, explain that chats must be chosen before agents can read them. Show a service error as an error rather than retaining a ready indicator.
+
+**Connect your agent** has the subtitle **Give your agent access to WhatsApp chats**. Its instructions card contains three numbered steps:
+
+1. Open your AI agent on this Mac.
+2. Copy the instructions and paste them into your agent’s chat.
+3. Send the message and follow any setup steps your agent provides.
+
+Place **Copy instructions** outside and 48 pt below the instructions card, followed by **Do it manually**. Keep the remaining spacing unchanged. Clicking **Copy instructions** creates and copies a temporary, single-use pairing invitation in one action. After copying, show **Instructions copied. Paste them into your agent’s chat within 10 minutes.** Keep progress/errors concise and include the expiry in the copied instructions. The agent exchanges the code over local HTTP and configures its own MCP client. Show **Done** only while the manual disclosure is open, including when adding a connection; add no bottom/footer explanatory text. Do not add a name field, client picker, separate generation button, instruction editor, executable path, or helper command. New connections use the first unused **Connection N** name, such as **Connection 1** and **Connection 2**. Preserve existing saved names.
+
+Below the primary action, **Do it manually** is an inline disclosure. Expanding it creates a manual connection when needed and shows **Add this URL and token to your agent’s MCP settings.** above shared inline credential rows below the manual action, outside the instructions card. The helper and rows have no new card, background, or border. Each row places its **URL** or **Token** label, value, and copy icon on one line. Use the full underlying token string and apply middle truncation only when the available width requires it; never construct a permanently abbreviated token. Copying always uses the complete value. Give icon buttons accessible **Copy URL** and **Copy Token** labels and clear copy feedback. Reuse these same rows inside saved connections. Keep setup open after manual creation so both values can be copied, and reuse the same connection when its details are hidden and reopened within setup.
+
+**Local MCP** has the page subtitle **Manage your agents’ access to WhatsApp** and lists saved connections as expandable row cards matching the home cards. The collapsed header has a left icon, the connection name, a subtitle such as **Last request 5m ago - Message sending off** or **No request yet - Message sending on**, and a chevron. Every connection uses `apple.terminal`; use `terminal` only when the preferred SF Symbol is unavailable on older macOS. Match the home Local MCP card's icon treatment: 23 pt in muted secondary color, centered in a 32 × 32 pt frame. This is uniform presentation with no random selection or saved icon state; ignore older icon metadata. Use recorded request activity, never server readiness, to form the subtitle. Long names and multiple connections must remain usable through wrapping or scrolling.
+
+The expanded connection card uses the same action-row spacing as the expanded WhatsApp card: 14 pt row insets, a 12 pt horizontal gap between label content and control, and a 5 pt gap between title and subtitle. Align titles/subtitles left and controls right. **Delete**, **Show**, and **Hide** share the button width used by WhatsApp's **Disconnect** and **Choose**.
+
+| Title | Subtitle | Right control |
 | --- | --- | --- |
-| Background | `#FAFAFA` | `#0F0F0F` |
-| Panel surface | `#EEEEEE` | `#1A1A1A` |
-| Selected surface | `#F3F3F3` | `#131313` |
-| Separator / pressed surface | `#DDDDDD` | `#242424` |
-| Primary text | `#151515` | `#F5F5F5` |
-| Secondary text | `#737373` | `#808080` |
-| Muted text | `#999999` | `#666666` |
-| Green accent | `#16852C` | `#28CD41` |
-| Red accent | `#D72C22` | `#FF3B30` |
-| Amber accent | `#A06500` | `#FFB000` |
+| **Delete connection** | Remove agent’s access to WhatsApp | **Delete** button |
+| **Allow message sending** | Let the agent send messages for you | Sending switch |
+| **Credentials** | **No request yet**, or **Last used at** followed by the recorded request timestamp in localized short date/time format | **Show**/**Hide** button |
 
-The accent names in Ratio are `create`, `consume`, and `unknown`. For LocalWhatsAppMCP, reserve accents for meaningful connection, error, or attention states, accompanied by text. Activity-category meanings do not transfer.
+Keep the connection header's existing activity and sending-status subtitle. The Credentials timestamp comes from recorded request activity, never from opening its disclosure. Confirm deletion; it immediately revokes that connection while leaving client configuration, other connections, and WhatsApp sync in place. Sending starts off. **Show** retrieves the selected active connection's existing stored URL/token through private app control, for paired and manual connections alike, and reveals the shared inline rows directly inside the connection card, without a nested card surface. The button becomes **Hide**. Showing or hiding credentials does not rotate the token or change permissions.
 
-- Main text: SF Mono, 12 pt regular; bold for limited emphasis; native monospaced system fallback.
-- Line height: 1.5 × font size, or 18 pt at the default size. Tracking: 0.4 pt.
-- Compact eyebrow helper: 10 pt uppercase. Text glyphs: Menlo Regular, 12 pt; many SF Symbol controls use 13 pt.
-- Reference content: 360 × 352 pt; eight 44 pt rows. The outer panel is 360 × 360 pt including an 8 pt top anchor.
-- Reference sections: 44 pt summary, 264 pt body, 44 pt footer. Main content commonly has 16 pt leading inset.
-- Settings and status rows: 272 pt label/content column and 88 pt action column. Separators are 0.5 pt.
-- Outer panel: 8 pt corner radius, shaped menu bar pointer, native shadow, and flat opaque content colors.
-- Standard buttons use separator color while pressed. Enabled footer buttons alone use white background and black foreground on hover or press.
-- Enabled controls use a pointing-hand cursor. Icon buttons have accessible labels and helpful tooltips.
+**Add new connection** opens the same **Connect your agent** screen. Finishing or going back returns to the existing list. Successful pairing returns automatically after recognizing the exact invitation; a manual connection may already be saved while setup remains open for copying. Clear transient in-app credentials on collapse, navigation, deletion, or Quit, and clear transient instructions when leaving setup. Retain explicitly copied URLs, tokens, and instructions on the clipboard so Copy → Done → paste works. Leaving setup does not expire an invitation early; its ten-minute expiry remains enforced by the service. There is no provider setup or browser authorization.
 
-## Adaptation to this product
+## Settings and lifecycle
 
-Keep the compact native menu bar presentation, typography, palette, row rhythm, and divided footer. A QR code and searchable chat list need more room than Ratio's fixed eight-row view. Allow an expanded setup or management surface while retaining those tokens; exact expanded dimensions remain an implementation choice.
+Settings contains **Start at Log In** with the subtext **Open automatically when you log in to your Mac**, its switch aligned right and green when enabled, any required operating-system recovery action, and **Quit**. It contains no Local MCP card. The interface currently uses dark appearance. Clicking outside leaves the window open, including while a native confirmation dialog is open. It uses normal window layering and Space behavior: other apps can cover it after gaining focus, and it does not float or appear on every Space. Both confirmation and cancellation buttons must work without hiding the window. Native close hides the window and the menu bar reopens it; background sync continues and in-progress selection is preserved. Quit stops owned processes. Keep keyboard access, named icon controls, and accessible selection state.
 
-Use a scannable QR code at its appropriate display size, a scrollable conversation list, and sufficient width for names and phone numbers. Preserve readable text and accessible controls instead of shrinking everything into 360 × 352 pt.
+A connected or idle status does not establish complete WhatsApp history. Error copy must describe a recovery the user can actually perform. Keep installation details inside MCP setup; the overview presents connection state and access to setup.
 
-Ratio's ratio summary, category arrows, daily history, Reset, Demo, and activity exports are incidental. LocalWhatsAppMCP needs connection status, chat scope, agent connections, and settings in their places.
+## Verification
 
-## Planned onboarding
-
-1. Start with a clear **Connect WhatsApp** action and QR scanning instructions. Show pairing progress and a recovery action when a code expires or linking fails.
-2. As soon as WhatsApp connects, capture incoming available history while setup continues. Describe it as available history, with honest progress; chat selection does not precede this initial capture.
-3. Present primary **Continue with all chats** and secondary **Select specific chats** below it. Explain the scope before confirmation.
-4. For specific selection, show the searchable list described below, then a clear confirmation action. Chat selection establishes the scope for ongoing storage and agent access.
-5. After scope confirmation, show **Connect an agent**. Local setup supplies instructions with a short-lived, single-use pairing token; successful redemption grants reading access without another approval prompt.
-
-Keep initial capture and current access scope distinguishable in copy: an excluded conversation can still have an initial local archive while being inaccessible to agents. Never describe selection as deleting that archive.
-
-## Chat selection and management
-
-- Show groups and direct chats together, ordered by most recent activity, in a familiar conversation-list arrangement.
-- Each row identifies the chat or group and has a check control on the right. Make long names distinguishable and expose selection state accessibly.
-- Search by group/chat name, contact name, or phone number. Search filters the list; it does not silently change the current selection.
-- With a search active, **Select all** selects every matching result, including matches outside the visible scroll area. It preserves existing selections outside that result set.
-- Show a useful empty-search state and the current selection count so bulk selection is understandable.
-- **All chats** is a persistent mode that includes future chats and groups. **Selected chats** is an explicit list; newly discovered conversations start excluded.
-- Reuse this selector for later additions and removals. Show the active mode and a route to change it from the main panel.
-- Saving a removal stops future storage and agent access for that chat. Previously archived content remains stored; do not imply a purge.
-
-## Agent connections and cloud setup
-
-Show named connections with their local/cloud context, connection state, and **Disconnect** action. Multiple agents share the WhatsApp connection and archive; each has separate credentials and permission state.
-
-Each connection has **Enable message sending**, off by default. The UI should describe text and attachment sending within selected chats. Editing, deleting, and group administration are outside v1.
-
-**Connect cloud agent** introduces provider choice: ngrok by default, with Cloudflare through `cloudflared` also supported. The setup instructions guide the local agent through installation, provider authentication, tunnel/hostname setup, saved local configuration, endpoint verification, and client configuration.
-
-Reflect setup progress and actionable failures in the app. A browser authorization step is acceptable when required by a cloud client. Present long-lived credentials through secure configuration, not conversation text or ordinary status displays. Exact cloud-client compatibility remains subject to technical validation.
-
-## Status, settings, and lifecycle
-
-Keep WhatsApp sync, MCP availability, and tunnel availability separately understandable. A working tunnel does not establish fresh WhatsApp data. Useful states include linking, receiving history, syncing, reconnecting, disconnected, and connection failure; show freshness when known.
-
-Offer settings for chat scope, agent connections and permissions, cloud exposure/provider, appearance, and **Open at login**. Launch at login is enabled for the intended product behavior, with visible recovery if macOS needs the user's approval.
-
-Closing or dismissing the UI leaves sync and any configured tunnel running. **Quit** stops them. Respect normal Mac sleep and reconnect on wake; cloud setup must explain that access depends on the Mac being awake and online.
-
-The reference supports keyboard focus, Escape dismissal, outside-click dismissal, and reopening from the menu bar. Preserve entered setup and selector state across incidental dismissal; implementation must make reopening safe while background work continues.
-
-Attachments are fetched on demand and cached. When an agent or user requests unavailable media, show a truthful failure or recovery state; saving attachment metadata does not establish that its bytes remain downloadable.
-
-## UI verification when implemented
-
-Check light and dark appearance, QR scanning, keyboard search/selection, long chat names, and names that share a phone-number match. Verify search-scoped **Select all** beyond the visible rows and selection retention when the query changes.
-
-Verify reconnect and tunnel-failure states separately, per-agent sending permissions, initial-import copy, reopening after dismissal, and explicit Quit. These are future acceptance checks; this planning document is not evidence that they pass.
+Render the overview, disconnected, QR, loading, linked, selector, settings, empty MCP setup, manual credentials, collapsed/expanded connections, shown/hidden credentials, and error states using synthetic data. Verify direct initial QR-to-selector-to-agent-setup routing for selected and all-chat saves, failed-save recovery, fresh-launch resumption at linking or unconfirmed selection, and returning-user overview/relink/chat-edit navigation with confirmed scope, including when no agent connections remain. Check that background refreshes respect onboarding exits and explicit navigation, that linked-account window reopen preserves the chosen page, and that unlinked-account reopen prepares QR setup. Verify the Choose connected chats row and collapsed chevron, and unchanged scope gating. Check the login label and green enabled switch, and that Settings omits Local MCP. Exercise single-action instruction copying, inline manual creation and reuse, full-value copying with width-dependent middle truncation, automatic pairing return, Add new connection/back navigation, paired and manual credential retrieval, sending toggles, and both deletion confirmation buttons. Check left-label/right-control alignment, single-line credential rows, and the absence of nested credential cards. Also exercise outside clicks, focus on another app, native close/reopen, and credential cleanup. Check native frame bounds, footer spacing, long names, keyboard search/selection, and rendered QR decoding. Keep live phone scanning, login approval, and sleep/wake evidence separate from demo checks. Do not copy account QR codes or credentials into fixtures or the repository.
