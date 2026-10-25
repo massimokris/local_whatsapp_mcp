@@ -2,6 +2,10 @@
 
 A native macOS menu bar app that connects your WhatsApp to your preferred local agents through **MCP**. Keep messages on your Mac, choose which chats agents can access, with the local MCP service enforcing chat access.
 
+![Setup walkthrough: connect WhatsApp, continue with all chats, and copy instructions to connect your agent.](docs/images/setup.gif)
+
+*Setup preview with sample data; WhatsApp linking and agent setup are simulated.*
+
 **Status:** local-only access with a dark WhatsApp interface and local MCP connection setup and management. The installation build targets Apple silicon and macOS 13 or newer. It is ad-hoc signed, not Developer ID signed or notarized.
 
 ## Install and connect
