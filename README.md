@@ -10,7 +10,7 @@ A native macOS menu bar app that connects WhatsApp to AI agents running on your 
 
 Requires **macOS 13 or later**. The current build is verified on Apple silicon and uses ad-hoc signing by default.
 
-1. Open the `.dmg` file produced under `dist/`.
+1. Download and open [LocalWhatsAppMCP-1.0.0-arm64.dmg](https://github.com/massimokris/local_whatsapp_mcp/releases/download/v1/LocalWhatsAppMCP-1.0.0-arm64.dmg).
 2. Drag **LocalWhatsAppMCP** into the **Applications** folder.
 3. Eject the disk image and open **LocalWhatsAppMCP** from Applications.
 
