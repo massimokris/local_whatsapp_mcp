@@ -296,7 +296,23 @@ final class AppModel: ObservableObject {
         let knownIDs = Set(state.agents.map(\.id))
         let generation = invitationGeneration
         if isDemo {
-            showInvitation(instructions: "Connect yourself to LocalWhatsAppMCP on this Mac. POST {\"token\":\"PREVIEW-ONLY-CODE\"} as application/json to http://127.0.0.1:32191/pairing/redeem. Save the returned access token privately, configure your own MCP client, and call check_status. This is a preview; no credential was created.", expiresAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(600)), invitationID: UUID().uuidString, knownIDs: knownIDs)
+            let expiresAt = ISO8601DateFormatter().string(from: Date().addingTimeInterval(600))
+            let instructions = """
+            Connect yourself to the LocalWhatsAppMCP server running on this Mac at http://127.0.0.1:32191/mcp using Streamable HTTP.
+
+
+            Exchange this single-use pairing code by sending POST http://127.0.0.1:32191/pairing/redeem with Content-Type: application/json and this JSON body: {"token":"PREVIEW-ONLY-CODE"}
+
+
+            The response contains id, url, access_token, and token_type (Bearer). Save access_token privately without printing it in the conversation or logs, and configure your own MCP client to use the returned url with Authorization: Bearer <access_token>.
+
+            Reload your MCP connection if needed and call check_status to verify it. This pairing code expires at \(expiresAt). Sending starts disabled; the app controls sending permission and chat scope.
+
+            After check_status succeeds, give the user a short overview of what you can do with their connected WhatsApp chats and one or two example requests.
+
+            This is a preview; no credential was created.
+            """
+            showInvitation(instructions: instructions, expiresAt: expiresAt, invitationID: UUID().uuidString, knownIDs: knownIDs)
             if let invitation { copyInvitation(invitation) }
             return
         }

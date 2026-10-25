@@ -461,7 +461,17 @@ func (s *Service) invite(name string) (map[string]any, error) {
 	}
 	s.cfg = candidate
 	baseURL := strings.TrimRight(s.opt.LocalURL, "/")
-	instructions := fmt.Sprintf("Connect yourself to the LocalWhatsAppMCP server running on this Mac at %s/mcp using Streamable HTTP.\nExchange this single-use pairing code by sending POST %s/pairing/redeem with Content-Type: application/json and this JSON body:\n{\"token\":\"%s\"}\nThe response contains id, url, access_token, and token_type (Bearer). Save access_token privately without printing it in the conversation or logs, and configure your own MCP client to use the returned url with Authorization: Bearer <access_token>. Reload your MCP connection if needed and call check_status to verify it.\nThis pairing code expires at %s. Sending starts disabled; the app controls sending permission and chat scope.", baseURL, baseURL, token, expiry.UTC().Format(time.RFC3339))
+	instructions := fmt.Sprintf(`Connect yourself to the LocalWhatsAppMCP server running on this Mac at %s/mcp using Streamable HTTP.
+
+
+Exchange this single-use pairing code by sending POST %s/pairing/redeem with Content-Type: application/json and this JSON body: {"token":"%s"}
+
+
+The response contains id, url, access_token, and token_type (Bearer). Save access_token privately without printing it in the conversation or logs, and configure your own MCP client to use the returned url with Authorization: Bearer <access_token>.
+
+Reload your MCP connection if needed and call check_status to verify it. This pairing code expires at %s. Sending starts disabled; the app controls sending permission and chat scope.
+
+After check_status succeeds, give the user a short overview of what you can do with their connected WhatsApp chats and one or two example requests.`, baseURL, baseURL, token, expiry.UTC().Format(time.RFC3339))
 	return map[string]any{"invitation_id": invitationID, "token": token, "instructions": instructions, "expires_at": expiry.UTC().Format(time.RFC3339)}, nil
 }
 func (s *Service) redeem(token string) (map[string]string, error) {
