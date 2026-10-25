@@ -263,16 +263,15 @@ try:
     check(process.returncode == 0 and not (data / 'control.sock').exists(), 'owner pipe closure stops the service and removes control socket')
     process = None
 finally:
-    for child in (process,):
-        if child is not None and child.poll() is None:
-            try:
-                child.terminate()
-                child.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=5)
-            except ProcessLookupError:
-                pass
+    if process is not None and process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        except ProcessLookupError:
+            pass
     shutil.rmtree(data)
 
 print('Bundle smoke passed: ' + str(len(checks)) + ' checks; temporary SQLite data removed.')
