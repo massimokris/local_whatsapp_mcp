@@ -6,14 +6,13 @@ public enum WhatsAppPanelOpening: Equatable {
     case qr(startConnection: Bool)
 
     public init(state: WhatsAppState, currentPageIsQR: Bool = false, foregroundOpen: Bool = true) {
-        let connected = ["connected", "ready", "syncing", "importing", "receiving_history"].contains(state.status ?? "")
         if state.disconnectPending == true || state.status == "disconnecting" {
             self = foregroundOpen || currentPageIsQR ? .home : .keepCurrentPage
-        } else if state.linked == true || connected {
+        } else if state.isLinked {
             // A saved link is enough to skip QR on reopen, even while offline.
             // During an explicit reconnect, keep its error visible until a live
             // connection succeeds or the user reopens the panel.
-            self = currentPageIsQR && (foregroundOpen || connected) ? .home : .keepCurrentPage
+            self = currentPageIsQR && (foregroundOpen || state.isConnected) ? .home : .keepCurrentPage
         } else if !foregroundOpen {
             self = .keepCurrentPage
         } else {

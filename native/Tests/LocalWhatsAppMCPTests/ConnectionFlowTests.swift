@@ -76,7 +76,7 @@ final class ConnectionFlowTests: XCTestCase {
         model.page = .mcp
         for saved in model.agents { model.removeAgent(saved) }
         XCTAssertTrue(model.agents.isEmpty)
-        XCTAssertFalse(model.isAddingConnection)
+        XCTAssertEqual(model.page, .mcp)
         XCTAssertTrue(model.canCreateConnection)
     }
 
@@ -112,11 +112,11 @@ final class ConnectionFlowTests: XCTestCase {
         model.beginPairing()
         model.copyInstructions()
         let invitation = try XCTUnwrap(model.invitation)
-        model.state.agents = [.init(id: "unrelated", name: invitation.name, client: "generic", pairingInvitationID: "different")]
+        model.state.agents = [.init(id: "unrelated", name: "Connection 1", client: "generic", pairingInvitationID: "different")]
         model.reconcileConnections()
         XCTAssertEqual(model.page, .pairing)
         XCTAssertNotNil(model.invitation)
-        model.state.agents.append(.init(id: "paired", name: invitation.name, client: "generic", pairingInvitationID: invitation.invitationID))
+        model.state.agents.append(.init(id: "paired", name: "Connection 1", client: "generic", pairingInvitationID: invitation.invitationID))
         model.reconcileConnections()
         XCTAssertEqual(model.page, .mcp)
         XCTAssertNil(model.invitation)

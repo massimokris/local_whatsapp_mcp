@@ -55,11 +55,11 @@ public struct ChatSelection: Sendable {
     }
     public var results: [Chat] {
         let mapping = canonicalIDs
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digits = term.filter(\.isNumber)
+        let isPhoneQuery = !digits.isEmpty && term.allSatisfy { $0.isNumber || "+()- .".contains($0) }
         return chats.filter { chat in
             guard mapping[chat.id] == chat.id else { return false }
-            let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            let digits = term.filter(\.isNumber)
-            let isPhoneQuery = !digits.isEmpty && term.allSatisfy { $0.isNumber || "+()- .".contains($0) }
             return term.isEmpty || [chat.displayName, chat.contactName ?? "", chat.phone ?? "", chat.id]
                 .contains { $0.range(of: term, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
                 || (isPhoneQuery && (chat.phone ?? "").filter(\.isNumber).contains(digits))

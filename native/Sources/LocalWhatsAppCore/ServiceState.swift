@@ -8,6 +8,10 @@ public struct WhatsAppState: Codable, Sendable {
     public var disconnectPending: Bool?
     public var lastEventAt: String?
     public var lastSyncedAt: String?
+    public var isConnected: Bool {
+        ["connected", "ready", "syncing", "importing", "receiving_history"].contains(status ?? "")
+    }
+    public var isLinked: Bool { linked == true || isConnected }
     public init(status: String? = nil, detail: String? = nil, qr: String? = nil, lastEventAt: String? = nil, linked: Bool? = nil, disconnectPending: Bool? = nil, lastSyncedAt: String? = nil) {
         self.status = status; self.detail = detail; self.qr = qr; self.lastEventAt = lastEventAt; self.linked = linked; self.disconnectPending = disconnectPending
         self.lastSyncedAt = lastSyncedAt
@@ -77,4 +81,13 @@ public struct SetupInstructions: Decodable {
     public var expiresAt: String?
     public var invitationID: String?
     enum CodingKeys: String, CodingKey { case instructions; case expiresAt = "expires_at", invitationID = "invitation_id" }
+}
+
+/// Service timestamps may include fractional seconds (Go's RFC3339Nano output).
+func parseServiceTimestamp(_ value: String?) -> Date? {
+    guard let value else { return nil }
+    let formatter = ISO8601DateFormatter()
+    if let date = formatter.date(from: value) { return date }
+    formatter.formatOptions.insert(.withFractionalSeconds)
+    return formatter.date(from: value)
 }

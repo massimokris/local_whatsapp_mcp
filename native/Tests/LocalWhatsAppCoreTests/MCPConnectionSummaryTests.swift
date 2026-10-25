@@ -10,19 +10,16 @@ final class MCPConnectionSummaryTests: XCTestCase {
         let summary = MCPConnectionSummary(state: state(), serviceAvailable: false)
         XCTAssertEqual(summary.statusText, "Local server unavailable")
         XCTAssertFalse(summary.isReady)
-        XCTAssertFalse(summary.canPair)
     }
 
     func testConfirmedScopeAllowsArchiveAccessWhileWhatsAppIsDisconnected() {
         for scope in [Scope(mode: "all"), Scope(mode: "selected") ] {
             let summary = MCPConnectionSummary(state: state(scope: scope), serviceAvailable: true)
             XCTAssertTrue(summary.isReady)
-            XCTAssertTrue(summary.canPair)
             XCTAssertEqual(summary.statusText, "Ready on this Mac")
         }
         let initial = MCPConnectionSummary(state: state(scope: .init()), serviceAvailable: true)
         XCTAssertFalse(initial.isReady)
-        XCTAssertFalse(initial.canPair)
         XCTAssertEqual(initial.statusText, "Choose chats to enable MCP")
     }
 
@@ -30,7 +27,6 @@ final class MCPConnectionSummaryTests: XCTestCase {
         for status in ["setup_required", "applying_scope", "unknown", nil] {
             let summary = MCPConnectionSummary(state: state(status: status), serviceAvailable: true)
             XCTAssertFalse(summary.isReady)
-            XCTAssertFalse(summary.canPair)
         }
         XCTAssertEqual(MCPConnectionSummary(state: state(status: "applying_scope"), serviceAvailable: true).statusText, "Updating chat access…")
         XCTAssertEqual(MCPConnectionSummary(state: state(status: "setup_required"), serviceAvailable: true).statusText, "Choose chats to enable MCP")
@@ -51,7 +47,6 @@ final class MCPConnectionSummaryTests: XCTestCase {
             let summary = MCPConnectionSummary(state: state(url: url), serviceAvailable: true)
             XCTAssertNil(summary.endpoint, url ?? "nil")
             XCTAssertFalse(summary.isReady)
-            XCTAssertFalse(summary.canPair)
         }
     }
 }

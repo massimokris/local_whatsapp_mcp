@@ -58,7 +58,7 @@ final class PanelOpeningTests: XCTestCase {
         let state = ServiceState(whatsapp: .init(status: "ready", linked: true))
         XCTAssertEqual(WhatsAppPanelOpening(state: state.whatsapp, currentPageIsQR: true, foregroundOpen: false), .home)
         XCTAssertFalse(state.scope.isConfirmed)
-        XCTAssertFalse(MCPConnectionSummary(state: state, serviceAvailable: true).canPair)
+        XCTAssertFalse(MCPConnectionSummary(state: state, serviceAvailable: true).isReady)
     }
 
     func testUnfinishedDisconnectAlwaysReturnsToRetryHome() {

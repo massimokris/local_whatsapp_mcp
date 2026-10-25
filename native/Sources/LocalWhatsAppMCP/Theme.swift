@@ -5,13 +5,11 @@ enum Theme {
     static let background = color(0x17161C)
     static let gradient = LinearGradient(colors: [color(0x1B1E26), color(0x16151B), color(0x241D2B)], startPoint: .topTrailing, endPoint: .bottomLeading)
     static let panel = color(0x2A282F)
-    static let selected = color(0x333039)
     static let line = Color.white.opacity(0.13)
     static let text = color(0xFAF9FC)
     static let secondary = color(0xA3A0AD)
     static let green = color(0x25D366)
     static let red = color(0xFF565E)
-    static let amber = color(0xD2B681)
     static func font(_ size: CGFloat = 14, weight: NSFont.Weight = .regular) -> Font {
         Font(NSFont.systemFont(ofSize: size, weight: weight))
     }
@@ -57,15 +55,14 @@ struct RowCardSurface: ViewModifier {
 }
 
 struct SoftCard<Content: View>: View {
-    var active = false
     @ViewBuilder let content: () -> Content
     var body: some View {
         content()
-            .background(active ? Theme.panel : Color.white.opacity(0.025))
+            .background(Theme.panel)
             .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .stroke(LinearGradient(colors: [.white.opacity(active ? 0.4 : 0.27), .white.opacity(0.065)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8)
+                    .stroke(LinearGradient(colors: [.white.opacity(0.4), .white.opacity(0.065)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.8)
             }
     }
 }

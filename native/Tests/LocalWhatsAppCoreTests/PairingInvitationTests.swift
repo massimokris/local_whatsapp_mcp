@@ -3,7 +3,7 @@ import XCTest
 
 final class PairingInvitationTests: XCTestCase {
     private func invitation(expiry: String? = "2026-10-23T12:00:00Z", instructions: String = "Synthetic setup instructions", invitationID: String = "invitation-a") -> PairingInvitation? {
-        PairingInvitation(instructions: instructions, expiresAt: expiry, invitationID: invitationID, name: "Work agent", client: "codex", knownAgentIDs: ["existing"])
+        PairingInvitation(instructions: instructions, expiresAt: expiry, invitationID: invitationID, knownAgentIDs: ["existing"])
     }
 
     private func agent(id: String, invitationID: String?) -> AgentConnection {
@@ -49,10 +49,10 @@ final class PairingInvitationTests: XCTestCase {
     func testSameNameAndClientInvitationsCannotCompleteEachOther() throws {
         let first = try XCTUnwrap(invitation(invitationID: "invitation-a"))
         let second = try XCTUnwrap(invitation(invitationID: "invitation-b"))
-        XCTAssertEqual(first.name, second.name)
-        XCTAssertEqual(first.client, second.client)
         let firstAgent = agent(id: "agent-a", invitationID: "invitation-a")
         let secondAgent = agent(id: "agent-b", invitationID: "invitation-b")
+        XCTAssertEqual(firstAgent.name, secondAgent.name)
+        XCTAssertEqual(firstAgent.client, secondAgent.client)
         XCTAssertNil(first.matchingAgent(in: [secondAgent]))
         XCTAssertNil(second.matchingAgent(in: [firstAgent]))
         XCTAssertEqual(first.matchingAgent(in: [secondAgent, firstAgent])?.id, "agent-a")

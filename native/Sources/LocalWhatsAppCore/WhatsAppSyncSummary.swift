@@ -7,14 +7,7 @@ public struct WhatsAppSyncSummary {
     public let connectedChatCount: Int?
 
     public init(whatsapp: WhatsAppState, scope: Scope, catalog: [Chat]?) {
-        let formatter = ISO8601DateFormatter()
-        let timestamp = whatsapp.lastSyncedAt ?? ""
-        if let date = formatter.date(from: timestamp) {
-            lastSyncedAt = date
-        } else {
-            formatter.formatOptions.insert(.withFractionalSeconds)
-            lastSyncedAt = formatter.date(from: timestamp)
-        }
+        lastSyncedAt = parseServiceTimestamp(whatsapp.lastSyncedAt)
         if let catalog, scope.isConfirmed {
             let saved = ChatSelection(chats: catalog, selectedIDs: Set(scope.chatIDs))
             connectedChatCount = scope.mode == "all" ? saved.results.count : saved.selectedIDs.count

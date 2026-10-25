@@ -66,12 +66,8 @@ final class AppModel: ObservableObject {
         self.runtime = runtime ?? HelperRuntime(helper: helpers.appendingPathComponent("localwhatsappmcp"), wacli: helpers.appendingPathComponent("wacli"), dataDirectory: applicationSupport.appendingPathComponent("LocalWhatsAppMCP"))
         if isDemo { loadDemo(page: environment["LWMCP_DEMO_PAGE"]) }
     }
-    var whatsappReady: Bool {
-        state.whatsapp.linked == true || ["connected", "ready", "syncing", "importing", "receiving_history"].contains(state.whatsapp.status ?? "")
-    }
-    var whatsappConnected: Bool {
-        ["connected", "ready", "syncing", "importing", "receiving_history"].contains(state.whatsapp.status ?? "")
-    }
+    var whatsappLinked: Bool { state.whatsapp.isLinked }
+    var whatsappConnected: Bool { state.whatsapp.isConnected }
     var whatsappNeedsReconnect: Bool {
         !whatsappDisconnectPending && !whatsappDisconnecting && (["attention", "error", "failed"].contains(state.whatsapp.status ?? "") ||
             (state.whatsapp.linked == true && !whatsappConnected && !["connecting", "linking"].contains(state.whatsapp.status ?? "")))
@@ -87,10 +83,10 @@ final class AppModel: ObservableObject {
         case "ready", "connected": return "Connected to this Mac"
         case "syncing", "importing", "receiving_history": return "Syncing messages…"
         case "linking": return "Waiting for your phone"
-        case "connecting": return whatsappReady ? "Reconnecting…" : "Connecting…"
+        case "connecting": return whatsappLinked ? "Reconnecting…" : "Connecting…"
         case "disconnecting": return "Disconnecting…"
         case "attention", "error", "failed": return "Needs attention"
-        default: return whatsappReady ? "Connection paused" : "Not connected"
+        default: return whatsappLinked ? "Connection paused" : "Not connected"
         }
     }
     var homeSubtitle: String {
@@ -105,7 +101,6 @@ final class AppModel: ObservableObject {
         let catalog = isDemo || lastCatalogRefresh != .distantPast ? selection.chats : nil
         return WhatsAppSyncSummary(whatsapp: state.whatsapp, scope: state.scope, catalog: catalog)
     }
-    var nativeAppearance: NSAppearance? { NSAppearance(named: .darkAqua) }
     var mcpSummary: MCPConnectionSummary { .init(state: state, serviceAvailable: serviceAvailable) }
     var agents: [AgentConnection] {
         state.agents.sorted {
@@ -113,8 +108,7 @@ final class AppModel: ObservableObject {
             return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
         }
     }
-    var isAddingConnection: Bool { page == .pairing }
-    var canCreateConnection: Bool { mcpSummary.canPair && !busy && !stopping }
+    var canCreateConnection: Bool { mcpSummary.isReady && !busy && !stopping }
     private var isConnectionPage: Bool { page == .mcp || page == .pairing }
     private var nextAgentName: String { AgentConnectionSummary.nextName(in: state.agents) }
     func panelOpened() {
@@ -161,7 +155,7 @@ final class AppModel: ObservableObject {
             if !didLoad { selection.selectedIDs = Set(latest.scope.chatIDs); didLoad = true }
             if error?.hasPrefix("Connecting to WhatsApp.") == true { error = nil }
             resolvePanelOpening(resumeInitialSetup: resumeInitialSetup)
-            if page == .chats || (whatsappReady && Date().timeIntervalSince(lastCatalogRefresh) > 15) {
+            if page == .chats || (whatsappLinked && Date().timeIntervalSince(lastCatalogRefresh) > 15) {
                 let catalog = try await runtime.control(method: "GET", path: "/catalog")
                 guard refreshRevision == stateRevision else { return }
                 selection.chats = try JSONDecoder().decode(Catalog.self, from: catalog).chats
@@ -212,7 +206,7 @@ final class AppModel: ObservableObject {
         }
     }
     private var needsInitialChatSelection: Bool {
-        whatsappReady && !state.scope.isConfirmed && !whatsappDisconnectPending && !whatsappDisconnecting
+        whatsappLinked && !state.scope.isConfirmed && !whatsappDisconnectPending && !whatsappDisconnecting
     }
     func showConnection() {
         page = .qr
@@ -302,7 +296,7 @@ final class AppModel: ObservableObject {
         let knownIDs = Set(state.agents.map(\.id))
         let generation = invitationGeneration
         if isDemo {
-            showInvitation(instructions: "Connect yourself to LocalWhatsAppMCP on this Mac. POST {\"token\":\"PREVIEW-ONLY-CODE\"} as application/json to http://127.0.0.1:32191/pairing/redeem. Save the returned access token privately, configure your own MCP client, and call check_status. This is a preview; no credential was created.", expiresAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(600)), invitationID: UUID().uuidString, name: name, knownIDs: knownIDs)
+            showInvitation(instructions: "Connect yourself to LocalWhatsAppMCP on this Mac. POST {\"token\":\"PREVIEW-ONLY-CODE\"} as application/json to http://127.0.0.1:32191/pairing/redeem. Save the returned access token privately, configure your own MCP client, and call check_status. This is a preview; no credential was created.", expiresAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(600)), invitationID: UUID().uuidString, knownIDs: knownIDs)
             if let invitation { copyInvitation(invitation) }
             return
         }
@@ -314,7 +308,7 @@ final class AppModel: ObservableObject {
                 let data = try await runtime.control(method: "POST", path: "/pairing", body: body)
                 let result = try JSONDecoder().decode(SetupInstructions.self, from: data)
                 guard isConnectionPage, !stopping, generation == invitationGeneration else { return }
-                showInvitation(instructions: result.instructions, expiresAt: result.expiresAt, invitationID: result.invitationID ?? "", name: name, knownIDs: knownIDs)
+                showInvitation(instructions: result.instructions, expiresAt: result.expiresAt, invitationID: result.invitationID ?? "", knownIDs: knownIDs)
                 if let invitation { copyInvitation(invitation) }
             } catch {
                 if isConnectionPage, generation == invitationGeneration { self.error = error.localizedDescription }
@@ -326,8 +320,8 @@ final class AppModel: ObservableObject {
         pasteboard.setString(invitation.instructions, forType: .string)
         instructionsCopied = true
     }
-    private func showInvitation(instructions: String, expiresAt: String?, invitationID: String, name: String, knownIDs: Set<String>) {
-        guard let pending = PairingInvitation(instructions: instructions, expiresAt: expiresAt, invitationID: invitationID, name: name, client: "generic", knownAgentIDs: knownIDs), !pending.isExpired(at: Date()) else {
+    private func showInvitation(instructions: String, expiresAt: String?, invitationID: String, knownIDs: Set<String>) {
+        guard let pending = PairingInvitation(instructions: instructions, expiresAt: expiresAt, invitationID: invitationID, knownAgentIDs: knownIDs), !pending.isExpired(at: Date()) else {
             error = "Setup instructions could not be prepared. Please try again."
             return
         }

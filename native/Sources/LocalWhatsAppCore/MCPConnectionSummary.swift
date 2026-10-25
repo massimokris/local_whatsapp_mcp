@@ -6,13 +6,11 @@ import Darwin
 public struct MCPConnectionSummary: Sendable {
     public let endpoint: String?
     public let statusText: String
-    public let canPair: Bool
     public let isReady: Bool
 
     public init(state: ServiceState, serviceAvailable: Bool) {
         endpoint = Self.localEndpoint(from: state.mcp.url)
         isReady = serviceAvailable && state.scope.isConfirmed && state.mcp.status == "ready" && endpoint != nil
-        canPair = isReady
 
         if !serviceAvailable {
             statusText = "Local server unavailable"

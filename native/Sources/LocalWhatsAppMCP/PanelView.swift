@@ -34,14 +34,14 @@ struct PanelView: View {
         .background(Theme.gradient)
         .preferredColorScheme(.dark)
         .onAppear {
-            if model.whatsappReady || model.whatsappDisconnectPending || (model.isDemo && ProcessInfo.processInfo.environment["LWMCP_DEMO_EXPANDED"] == "1") { sourceExpanded = true }
+            if model.whatsappLinked || model.whatsappDisconnectPending || (model.isDemo && ProcessInfo.processInfo.environment["LWMCP_DEMO_EXPANDED"] == "1") { sourceExpanded = true }
             if model.isDemo && ProcessInfo.processInfo.environment["LWMCP_DEMO_EXPANDED"] == "0" { sourceExpanded = false }
             if model.isDemo && ProcessInfo.processInfo.environment["LWMCP_DEMO_PAGE"] == "qr-hover" { qrHovered = true }
         }
         .onChange(of: model.whatsappDisconnectPending) { pending in
             if pending { sourceExpanded = true }
         }
-        .onChange(of: model.whatsappReady) { linked in
+        .onChange(of: model.whatsappLinked) { linked in
             if linked { sourceExpanded = true }
         }
         .alert("Disconnect WhatsApp?", isPresented: $confirmDisconnect) {
@@ -86,7 +86,7 @@ struct PanelView: View {
     }
     private var homeHasFooterActions: Bool {
         !model.whatsappDisconnectPending && !model.whatsappDisconnecting &&
-            (model.whatsappNeedsReconnect || !model.whatsappReady || !model.state.scope.isConfirmed)
+            (model.whatsappNeedsReconnect || !model.whatsappLinked || !model.state.scope.isConfirmed)
     }
     private func bottomInset(for height: CGFloat) -> CGFloat {
         if model.page == .qr || (model.page == .home && !homeHasFooterActions) { return 24 }
@@ -102,7 +102,7 @@ struct PanelView: View {
             if homeHasFooterActions {
                 if model.whatsappNeedsReconnect {
                     primary("Reconnect WhatsApp", action: model.showConnection)
-                } else if model.whatsappReady {
+                } else if model.whatsappLinked {
                     if !model.state.scope.isConfirmed {
                         primary("Choose chats", action: model.editChats)
                     }
@@ -133,10 +133,10 @@ struct PanelView: View {
             if sourceExpanded {
                 Rectangle().fill(Theme.line).frame(height: 0.5).padding(.horizontal, 12)
                 CardActionRow(
-                    title: model.whatsappReady ? "Stop syncing WhatsApp" : "Connect WhatsApp",
-                    subtitle: model.whatsappReady ? "Signs this Mac out of WhatsApp." : "Scan a QR code from your phone to link this Mac"
+                    title: model.whatsappLinked ? "Stop syncing WhatsApp" : "Connect WhatsApp",
+                    subtitle: model.whatsappLinked ? "Signs this Mac out of WhatsApp." : "Scan a QR code from your phone to link this Mac"
                 ) {
-                    if model.whatsappReady || model.whatsappDisconnecting {
+                    if model.whatsappLinked || model.whatsappDisconnecting {
                         Button { confirmDisconnect = true } label: {
                             HStack(spacing: 5) {
                                 if model.whatsappDisconnecting { ProgressView().controlSize(.mini) }
@@ -147,7 +147,7 @@ struct PanelView: View {
                         Button("Connect", action: model.showConnection).buttonStyle(QuietButtonStyle()).disabled(model.busy)
                     }
                 }
-                if model.state.scope.isConfirmed && model.whatsappReady &&
+                if model.state.scope.isConfirmed && model.whatsappLinked &&
                     !model.whatsappDisconnecting && !model.whatsappDisconnectPending {
                     CardActionRow(title: "Choose connected chats", subtitle: model.connectedChatsSummary) {
                         Button("Choose", action: model.editChats).buttonStyle(QuietButtonStyle(width: sourceActionButtonWidth)).disabled(model.busy)
@@ -168,7 +168,7 @@ struct PanelView: View {
             heading(model.whatsappConnected ? "WhatsApp connected" : "Connect WhatsApp", subtitle: model.whatsappConnected ? "Your messages can now sync to this Mac." : "Scan the QR code with your phone")
                 .padding(.top, 13).padding(.bottom, 24)
             ScrollView {
-                SoftCard(active: true) {
+                SoftCard {
                     VStack(alignment: .leading, spacing: 13) {
                         if !model.whatsappConnected {
                             instruction(1, "Open WhatsApp on your phone")

@@ -9,7 +9,7 @@ public struct AgentConnectionSummary: Sendable {
 
     public func text(at now: Date = Date()) -> String {
         let sending = agent.sendEnabled == true ? "Message sending on" : "Message sending off"
-        guard let raw = agent.lastSeenAt, let date = Self.requestDate(raw) else {
+        guard let date = parseServiceTimestamp(agent.lastSeenAt) else {
             return "No request yet - \(sending)"
         }
         let minutes = Int(max(0, now.timeIntervalSince(date)) / 60)
@@ -22,7 +22,7 @@ public struct AgentConnectionSummary: Sendable {
     }
 
     public var lastUsedText: String {
-        guard let raw = agent.lastSeenAt, let date = Self.requestDate(raw) else { return "No request yet" }
+        guard let date = parseServiceTimestamp(agent.lastSeenAt) else { return "No request yet" }
         let formatter = DateFormatter()
         formatter.dateStyle = .short
         formatter.timeStyle = .short
@@ -34,12 +34,5 @@ public struct AgentConnectionSummary: Sendable {
         var number = 1
         while existing.contains("connection \(number)") { number += 1 }
         return "Connection \(number)"
-    }
-
-    private static func requestDate(_ value: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        if let date = formatter.date(from: value) { return date }
-        formatter.formatOptions.insert(.withFractionalSeconds)
-        return formatter.date(from: value)
     }
 }

@@ -27,7 +27,7 @@ struct MCPConnectionsView: View {
 
     var body: some View {
         Group {
-            if model.agents.isEmpty || model.isAddingConnection {
+            if model.agents.isEmpty {
                 AgentPairingView(model: model)
             } else {
                 connections
@@ -181,7 +181,7 @@ struct AgentPairingView: View {
                         }
                     }
                     if let notice = model.pairingNotice { MCPNotice(text: notice) }
-                    if !model.mcpSummary.canPair { MCPNotice(text: model.mcpSummary.statusText) }
+                    if !model.mcpSummary.isReady { MCPNotice(text: model.mcpSummary.statusText) }
                     MCPError(model: model)
                 }.padding(.bottom, 12)
             }.scrollIndicators(.hidden)
@@ -234,14 +234,12 @@ struct MCPCredentialsRows: View {
 
 private struct MCPHeading: View {
     let title: String
-    var subtitle: String? = nil
+    let subtitle: String
     var body: some View {
         VStack(spacing: 9) {
             Text(title).font(Theme.heading()).tracking(-0.9).accessibilityAddTraits(.isHeader)
-            if let subtitle {
-                Text(subtitle).font(Theme.font(14)).foregroundStyle(Theme.secondary)
-                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-            }
+            Text(subtitle).font(Theme.font(14)).foregroundStyle(Theme.secondary)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
         }.frame(maxWidth: .infinity).padding(.top, 13).padding(.bottom, 24)
     }
 }
