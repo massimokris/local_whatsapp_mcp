@@ -203,6 +203,7 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 			args = []string{"--owner-stdin", "--events", "auth", "--follow", "--qr-format", "text"}
 		}
 		cmd := exec.Command(e.binary, e.args(args...)...)
+		cmd.Env = append(os.Environ(), "WACLI_DEVICE_LABEL=LocalWhatsAppMCP")
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdout = io.Discard
 		lifetime, lifetimeErr := cmd.StdinPipe()
@@ -348,6 +349,7 @@ func (e *Engine) Call(ctx context.Context, write bool, args ...string) (json.Raw
 		global = append(global, "--read-only")
 	}
 	cmd := exec.CommandContext(ctx, e.binary, e.args(append(global, args...)...)...)
+	cmd.Env = append(os.Environ(), "WACLI_DEVICE_LABEL=LocalWhatsAppMCP")
 	out := &limitedBuffer{limit: 24 << 20}
 	stderr := &limitedBuffer{limit: 1 << 20}
 	cmd.Stdout = out

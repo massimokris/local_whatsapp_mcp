@@ -38,6 +38,11 @@ installation acceptance test.
 ## Integration contract
 
 Every app-owned invocation supplies `--store DIR --content-policy PATH`.
+The service sets `WACLI_DEVICE_LABEL=LocalWhatsAppMCP` for each child process,
+overriding any inherited label so new links identify the app on the phone's
+Linked devices screen. This uses the pinned engine's existing environment option;
+no upstream patch is needed. Existing linked entries may require relinking to
+display a changed label.
 Long-running `auth`/`sync` also supply `--owner-stdin` with a pipe held open by
 the service. Pipe EOF/read failure triggers graceful cancellation and an
 `owner_lost` lifecycle event, so a crashed service cannot leave an unrestricted
