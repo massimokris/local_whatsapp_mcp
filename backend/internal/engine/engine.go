@@ -418,7 +418,7 @@ func (e *Engine) Catalog(ctx context.Context) ([]Chat, error) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	rows, err := db.QueryContext(ctx, `SELECT c.jid, COALESCE(NULLIF(c.name,''),NULLIF(a.alias,''),NULLIF(p.system_name,''),NULLIF(p.full_name,''),NULLIF(p.push_name,''),NULLIF(p.phone,''),c.jid), COALESCE(p.phone,''),c.kind,COALESCE(c.last_message_ts,0),COALESCE(NULLIF(a.alias,''),NULLIF(p.system_name,''),NULLIF(p.full_name,''),p.push_name,'') FROM chats c LEFT JOIN contacts p ON p.jid=c.jid LEFT JOIN contact_aliases a ON a.jid=c.jid WHERE c.kind IN ('dm','group','unknown') AND (c.jid LIKE '%@s.whatsapp.net' OR c.jid LIKE '%@lid' OR c.jid LIKE '%@g.us') ORDER BY COALESCE(c.last_message_ts,0) DESC,c.jid`)
+	rows, err := db.QueryContext(ctx, `SELECT c.jid, COALESCE(NULLIF(c.name,''),NULLIF(a.alias,''),NULLIF(p.system_name,''),NULLIF(p.full_name,''),NULLIF(p.push_name,''),NULLIF(p.phone,''),c.jid), COALESCE(p.phone,''),c.kind,COALESCE(c.last_message_ts,0),COALESCE(NULLIF(a.alias,''),NULLIF(p.system_name,''),NULLIF(p.full_name,''),p.push_name,''),COALESCE(c.archived,0) FROM chats c LEFT JOIN contacts p ON p.jid=c.jid LEFT JOIN contact_aliases a ON a.jid=c.jid WHERE c.kind IN ('dm','group','unknown') AND (c.jid LIKE '%@s.whatsapp.net' OR c.jid LIKE '%@lid' OR c.jid LIKE '%@g.us') ORDER BY COALESCE(c.last_message_ts,0) DESC,c.jid`)
 	if err != nil {
 		return nil, errors.New("local chat catalog is not ready; wait for WhatsApp to initialize")
 	}
@@ -427,7 +427,7 @@ func (e *Engine) Catalog(ctx context.Context) ([]Chat, error) {
 	for rows.Next() {
 		var c Chat
 		var ts int64
-		if err = rows.Scan(&c.ID, &c.Name, &c.Phone, &c.Kind, &ts, &c.ContactName); err != nil {
+		if err = rows.Scan(&c.ID, &c.Name, &c.Phone, &c.Kind, &ts, &c.ContactName, &c.Archived); err != nil {
 			return nil, errors.New("local chat catalog has an unexpected format")
 		}
 		if c.Kind != "group" {

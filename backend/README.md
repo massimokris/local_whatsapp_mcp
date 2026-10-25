@@ -2,6 +2,8 @@
 
 The Go service owns app configuration, shared scope, independent agent grants, authenticated Streamable HTTP, private Unix control, and the bundled wacli supervisor. It never writes upstream message/session databases. The only direct upstream SQL is a pinned, read-only minimal catalog query.
 
+Catalog rows and MCP `find_conversations` include `archived: true/false`, read from the existing `chats.archived` column maintained by wacli's WhatsApp sync. MCP still filters every result by shared chat scope. Archive status is independent of scope and can lag the phone while syncing or offline; the service adds no archive/unarchive action.
+
 Build and test from this directory:
 
 ```sh

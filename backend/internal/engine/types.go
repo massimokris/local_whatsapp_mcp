@@ -19,6 +19,7 @@ type Chat struct {
 	Name         string   `json:"name"`
 	Phone        string   `json:"phone"`
 	Kind         string   `json:"kind"`
+	Archived     bool     `json:"archived"`
 	LastActivity string   `json:"last_activity"`
 }
 type Status struct {

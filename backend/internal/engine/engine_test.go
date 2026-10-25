@@ -60,7 +60,7 @@ func TestPinnedEngineStructuredBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, err = db.Exec(`INSERT INTO chats(jid,kind,name,last_message_ts) VALUES('123@s.whatsapp.net','dm','Work',1000);INSERT INTO messages(chat_jid,msg_id,ts,from_me,text,display_text) VALUES('123@s.whatsapp.net','fixture-1',1000,0,'fixture hello','fixture hello')`)
+	_, err = db.Exec(`INSERT INTO chats(jid,kind,name,last_message_ts,archived) VALUES('123@s.whatsapp.net','dm','Work',1000,1);INSERT INTO messages(chat_jid,msg_id,ts,from_me,text,display_text) VALUES('123@s.whatsapp.net','fixture-1',1000,0,'fixture hello','fixture hello')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,11 +74,18 @@ func TestPinnedEngineStructuredBoundary(t *testing.T) {
 	session.Close()
 	e := engine.New(binary, dir)
 	chats, err := e.Catalog(context.Background())
-	if err != nil || len(chats) != 1 || chats[0].Name != "Work" {
+	if err != nil || len(chats) != 1 || chats[0].Name != "Work" || !chats[0].Archived {
 		t.Fatal(chats, err)
 	}
 	if !reflect.DeepEqual(chats[0].Aliases, []string{"123@s.whatsapp.net", "999@lid"}) {
 		t.Fatalf("catalog lacks verified migrated identity: %+v", chats)
+	}
+	if _, err := db.Exec(`UPDATE chats SET archived=0 WHERE jid='123@s.whatsapp.net'`); err != nil {
+		t.Fatal(err)
+	}
+	chats, err = e.Catalog(context.Background())
+	if err != nil || len(chats) != 1 || chats[0].Archived {
+		t.Fatalf("catalog did not reflect unarchive: %+v, %v", chats, err)
 	}
 	ids, err := e.Resolve(context.Background(), "123@s.whatsapp.net")
 	if err != nil || len(ids) != 2 {

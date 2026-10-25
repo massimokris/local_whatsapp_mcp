@@ -133,9 +133,9 @@ try:
     check(initialized_store.returncode == 0, 'pinned engine initializes an unlinked synthetic archive')
     # Synthetic fixture insertion only. Production archive writes remain upstream-owned.
     with sqlite3.connect(data / 'store/wacli.db') as archive:
-        archive.executemany('INSERT INTO chats(jid,kind,name,last_message_ts) VALUES(?,?,?,?)',
-                            [('123@s.whatsapp.net', 'dm', 'Fixture Work', 1003),
-                             ('999@s.whatsapp.net', 'dm', 'Fixture Hidden', 1004)])
+        archive.executemany('INSERT INTO chats(jid,kind,name,last_message_ts,archived) VALUES(?,?,?,?,?)',
+                            [('123@s.whatsapp.net', 'dm', 'Fixture Work', 1003, 1),
+                             ('999@s.whatsapp.net', 'dm', 'Fixture Hidden', 1004, 1)])
         archive.executemany('INSERT INTO messages(chat_jid,msg_id,ts,from_me,text,display_text) VALUES(?,?,?,?,?,?)',
                             [('123@s.whatsapp.net', 'm' + str(i), 1000 + i, 0, 'alpha fixture ' + str(i), 'alpha fixture ' + str(i))
                              for i in range(1, 4)] +
@@ -214,6 +214,11 @@ try:
         return result['structuredContent']
     conversations = tool('find_conversations', {}, 10)
     check([row['id'] for row in conversations['chats']] == ['123@s.whatsapp.net'], 'real archive catalog respects scope')
+    check(conversations['chats'][0].get('archived') is True, 'conversation results expose the stored WhatsApp archived status')
+    with sqlite3.connect(data / 'store/wacli.db') as archive:
+        archive.execute('UPDATE chats SET archived=0 WHERE jid=?', ('123@s.whatsapp.net',))
+    conversations = tool('find_conversations', {}, 101)
+    check(conversations['chats'][0].get('archived') is False, 'conversation results reflect unarchive without omitting false')
     first = tool('read_messages', {'chat_id': '123@s.whatsapp.net', 'limit': 2}, 11)
     check(len(first['messages']) == 2 and first['has_more'], 'real archive message pagination is bounded')
     second = tool('read_messages', {'chat_id': '123@s.whatsapp.net', 'limit': 2, 'cursor': first['next_cursor']}, 12)
