@@ -264,10 +264,150 @@ index 0000000..a16e833
 +		t.Fatalf("file dispatch not denied: %v", err)
 +	}
 +}
+diff --git a/cmd/wacli/media.go b/cmd/wacli/media.go
+index 863123d..7329a6b 100644
+--- a/cmd/wacli/media.go
++++ b/cmd/wacli/media.go
+@@ -233,13 +233,16 @@ func mediaBulkTimeoutEnabled(cmd *cobra.Command, flags *rootFlags) bool {
+ 
+ func newMediaDownloadCmd(flags *rootFlags) *cobra.Command {
+ 	var chat, id, outputPath string
+-	var retryOnPhone bool
++	var retryOnPhone, cacheOnly bool
+ 	cmd := &cobra.Command{
+ 		Use: "download", Short: "Download media for a message",
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			if strings.TrimSpace(chat) == "" || strings.TrimSpace(id) == "" {
+ 				return fmt.Errorf("--chat and --id are required")
+ 			}
++			if retryOnPhone && cacheOnly {
++				return fmt.Errorf("--cache-only cannot request --retry-on-phone")
++			}
+ 			if retryOnPhone && flags.isReadOnly() {
+ 				return fmt.Errorf("read-only mode: --retry-on-phone would request recovery and update the local store")
+ 			}
+@@ -248,7 +251,7 @@ func newMediaDownloadCmd(flags *rootFlags) *cobra.Command {
+ 			}
+ 			ctx, cancel := withTimeout(cmd.Context(), flags)
+ 			defer cancel()
+-			result, err := downloadExactMedia(ctx, flags, chat, id, outputPath, retryOnPhone)
++			result, err := downloadExactMedia(ctx, flags, chat, id, outputPath, retryOnPhone, cacheOnly)
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -263,6 +266,7 @@ func newMediaDownloadCmd(flags *rootFlags) *cobra.Command {
+ 	cmd.Flags().StringVar(&id, "id", "", "message ID")
+ 	cmd.Flags().StringVar(&outputPath, "output", "", "output file or directory (default: store media dir)")
+ 	cmd.Flags().BoolVar(&retryOnPhone, "retry-on-phone", false, "recover this exact message from the phone after HTTP 403, 404 or 410 (writable only)")
++	cmd.Flags().BoolVar(&cacheOnly, "cache-only", false, "copy only verified cached media; never connect, download, or request phone recovery")
+ 	_ = cmd.MarkFlagRequired("chat")
+ 	_ = cmd.MarkFlagRequired("id")
+ 	return cmd
+diff --git a/cmd/wacli/media_cache_only_test.go b/cmd/wacli/media_cache_only_test.go
+new file mode 100644
+index 0000000..bdcdf96
+--- /dev/null
++++ b/cmd/wacli/media_cache_only_test.go
+@@ -0,0 +1,86 @@
++package main
++
++import (
++	"crypto/sha256"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/lock"
++	"github.com/openclaw/wacli/internal/store"
++)
++
++func TestMediaCacheOnlyNeverNeedsSessionOrWriter(t *testing.T) {
++	for _, state := range []string{"verified", "missing", "corrupt"} {
++		for _, readOnly := range []bool{true, false} {
++			t.Run(state+map[bool]string{true: "/read-only", false: "/writable"}[readOnly], func(t *testing.T) {
++				dir := t.TempDir()
++				db, err := store.Open(filepath.Join(dir, "wacli.db"))
++				if err != nil {
++					t.Fatal(err)
++				}
++				chat, id := "111@s.whatsapp.net", "cache-only"
++				content := []byte("verified offline attachment")
++				hash := sha256.Sum256(content)
++				if err := db.UpsertChat(chat, "dm", "Synthetic", time.Now()); err != nil {
++					t.Fatal(err)
++				}
++				if err := db.UpsertMessage(store.UpsertMessageParams{ChatJID: chat, MsgID: id, SenderJID: chat, Timestamp: time.Now(), MediaType: "document", MimeType: "text/plain", DirectPath: "invalid-location-that-must-not-be-used", MediaKey: make([]byte, 32), FileSHA256: hash[:], FileLength: uint64(len(content))}); err != nil {
++					t.Fatal(err)
++				}
++				cache := filepath.Join(dir, "cached.txt")
++				if state != "missing" {
++					data := content
++					if state == "corrupt" {
++						data = []byte("corrupt or interrupted download")
++					}
++					if err := os.WriteFile(cache, data, 0600); err != nil {
++						t.Fatal(err)
++					}
++					if err := db.MarkMediaDownloaded(chat, id, cache, time.Now()); err != nil {
++						t.Fatal(err)
++					}
++				}
++				db.Close()
++				lk, err := lock.Acquire(dir)
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer lk.Release()
++				target := filepath.Join(dir, "output.txt")
++				args := []string{"--store", dir, "--json", "--timeout", "2s", "media", "download", "--chat", chat, "--id", id, "--output", target, "--cache-only"}
++				if readOnly {
++					args = append([]string{"--read-only"}, args...)
++				}
++				stdout, stderr, err := runPresenceDelegateHelper(t, args)
++				if state == "verified" {
++					if err != nil || !strings.Contains(stdout, `"source":"cache"`) {
++						t.Fatalf("verified cache rejected: %v stdout=%s stderr=%s", err, stdout, stderr)
++					}
++					if data, err := os.ReadFile(target); err != nil || string(data) != string(content) {
++						t.Fatal("incorrect cached output", err)
++					}
++				} else {
++					if err == nil || !strings.Contains(stdout+stderr, "media_not_cached") {
++						t.Fatalf("cache miss did not stop before network/auth: %v stdout=%s stderr=%s", err, stdout, stderr)
++					}
++					if _, err := os.Stat(target); !os.IsNotExist(err) {
++						t.Fatal("cache miss published output", err)
++					}
++				}
++				if _, err := os.Stat(filepath.Join(dir, "session.db")); !os.IsNotExist(err) {
++					t.Fatal("cache-only opened a session", err)
++				}
++			})
++		}
++	}
++}
++
++func TestMediaCacheOnlyRejectsPhoneRecovery(t *testing.T) {
++	err := execute([]string{"--store", t.TempDir(), "media", "download", "--chat", "111@s.whatsapp.net", "--id", "fixture", "--cache-only", "--retry-on-phone"})
++	if err == nil || !strings.Contains(err.Error(), "--cache-only") {
++		t.Fatal("cache-only accepted phone recovery", err)
++	}
++}
 diff --git a/cmd/wacli/media_download.go b/cmd/wacli/media_download.go
-index 34b4073..4a6ab3e 100644
+index 34b4073..e6df15e 100644
 --- a/cmd/wacli/media_download.go
 +++ b/cmd/wacli/media_download.go
+@@ -34,7 +34,7 @@ func mediaResult(info store.MediaDownloadInfo, path string, bytes int64, source
+ 		MediaType: info.MediaType, MIMEType: info.MimeType, Downloaded: true, Source: source}
+ }
+ 
+-func downloadExactMedia(ctx context.Context, flags *rootFlags, chat, id, output string, retry bool) (*mediaDownloadResult, error) {
++func downloadExactMedia(ctx context.Context, flags *rootFlags, chat, id, output string, retry, cacheOnly bool) (*mediaDownloadResult, error) {
+ 	// Cache inspection must precede any writer/session lock. A read-only app
+ 	// reads only the message index, even for a writable download invocation.
+ 	roFlags := *flags
 @@ -42,7 +42,14 @@ func downloadExactMedia(ctx context.Context, flags *rootFlags, chat, id, output
  	reader, _, preflightErr := newApp(ctx, &roFlags, false, false)
  	var info store.MediaDownloadInfo
@@ -283,7 +423,20 @@ index 34b4073..4a6ab3e 100644
  		info, preflightErr = reader.DB().GetMediaDownloadInfo(chat, id)
  		if preflightErr == nil {
  			target, preflightErr = reader.ResolveMediaOutputPath(info, output)
-@@ -149,6 +156,7 @@ func requireMediaMetadata(info store.MediaDownloadInfo) error {
+@@ -62,6 +69,12 @@ func downloadExactMedia(ctx context.Context, flags *rootFlags, chat, id, output
+ 			}
+ 		}
+ 	}
++	if cacheOnly {
++		if preflightErr != nil {
++			return nil, preflightErr
++		}
++		return nil, fmt.Errorf("media_not_cached: reconnect WhatsApp to download this attachment")
++	}
+ 	if flags.isReadOnly() {
+ 		if preflightErr != nil {
+ 			return nil, preflightErr
+@@ -149,6 +162,7 @@ func requireMediaMetadata(info store.MediaDownloadInfo) error {
  // This narrow boundary permits a protocol fake in tests while exercising the
  // real SQLite cache and output behavior used by both direct and owner requests.
  type exactMediaDownloadApp interface {
@@ -291,7 +444,7 @@ index 34b4073..4a6ab3e 100644
  	DB() *store.DB
  	WA() app.WAClient
  	ResolveMediaOutputPath(store.MediaDownloadInfo, string) (string, error)
-@@ -156,6 +164,9 @@ type exactMediaDownloadApp interface {
+@@ -156,6 +170,9 @@ type exactMediaDownloadApp interface {
  }
  
  func executeExactMediaDownload(ctx context.Context, a exactMediaDownloadApp, chat, id string, retry bool) (*mediaDownloadResult, error) {

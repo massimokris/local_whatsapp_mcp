@@ -85,3 +85,12 @@ The policy is an ingestion/media defense, not an authenticated agent API. The
 companion independently enforces current scope, sending grants, response row
 validation, revisions, and authenticated attachment handles across its MCP
 surface. A user who directly invokes the local CLI owns the upstream archive.
+
+### Offline media after disconnect
+
+`media download --cache-only --chat JID --id MESSAGE --output PATH` copies a
+verified cached attachment under the current content policy. It exits with
+`media_not_cached` on a missing or corrupt cache, before opening a writable
+session, contacting the CDN, or requesting phone recovery. It works with
+`--read-only` and rejects `--retry-on-phone`. Ordinary `--read-only` media download
+alone can contact the CDN; it is not an offline guarantee.
