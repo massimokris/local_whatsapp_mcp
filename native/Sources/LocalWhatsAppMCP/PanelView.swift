@@ -134,7 +134,7 @@ struct PanelView: View {
                 Rectangle().fill(Theme.line).frame(height: 0.5).padding(.horizontal, 12)
                 CardActionRow(
                     title: model.whatsappReady ? "Stop syncing WhatsApp" : "Connect WhatsApp",
-                    subtitle: model.whatsappReady ? "Signs this Mac out of WhatsApp." : "Scan a QR code from your phone to link this Mac."
+                    subtitle: model.whatsappReady ? "Signs this Mac out of WhatsApp." : "Scan a QR code from your phone to link this Mac"
                 ) {
                     if model.whatsappReady || model.whatsappDisconnecting {
                         Button { confirmDisconnect = true } label: {
@@ -147,7 +147,8 @@ struct PanelView: View {
                         Button("Connect", action: model.showConnection).buttonStyle(QuietButtonStyle()).disabled(model.busy)
                     }
                 }
-                if model.state.scope.isConfirmed {
+                if model.state.scope.isConfirmed && model.whatsappReady &&
+                    !model.whatsappDisconnecting && !model.whatsappDisconnectPending {
                     CardActionRow(title: "Choose connected chats", subtitle: model.connectedChatsSummary) {
                         Button("Choose", action: model.editChats).buttonStyle(QuietButtonStyle(width: sourceActionButtonWidth)).disabled(model.busy)
                             .accessibilityLabel("Choose connected chats")
