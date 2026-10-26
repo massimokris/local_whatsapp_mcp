@@ -2,6 +2,8 @@
 
 A native macOS menu bar app that connects WhatsApp to AI agents running on your Mac through **MCP**. Choose which chats they can read and whether they can send messages. Your archive stays on your Mac.
 
+Download it [here](https://github.com/massimokris/local_whatsapp_mcp/releases/download/v1/LocalWhatsAppMCP-1.0.0-arm64.dmg) for free.
+
 ![Setup walkthrough: connect WhatsApp, continue with all chats, and copy instructions to connect your agent.](docs/images/setup.gif)
 
 *Setup preview with sample data; WhatsApp linking and agent setup are simulated.*
