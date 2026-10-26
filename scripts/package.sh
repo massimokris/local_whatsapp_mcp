@@ -11,9 +11,9 @@ name="LocalWhatsAppMCP-$version-$architecture"
 stage=$(mktemp -d "$root/build/package-stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 if [ -n "${NOTARY_PROFILE:-}" ]; then
-  codesign -dv "$app" 2>&1 | grep -q 'Authority=Developer ID Application:' || { printf 'Notarization requires a Developer ID Application signed app.\n' >&2; exit 1; }
+  codesign -dv --verbose=4 "$app" 2>&1 | grep -q 'Authority=Developer ID Application:' || { printf 'Notarization requires a Developer ID Application signed app.\n' >&2; exit 1; }
   ditto -c -k --keepParent "$app" "$stage/notarize.zip"
-  xcrun notarytool submit "$stage/notarize.zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun notarytool submit "$stage/notarize.zip" --keychain-profile "$NOTARY_PROFILE" --no-s3-acceleration --wait
   xcrun stapler staple "$app"
   xcrun stapler validate "$app"
 fi
@@ -25,7 +25,7 @@ if [ -n "${SIGNING_IDENTITY:-}" ] && [ "$SIGNING_IDENTITY" != - ]; then
   codesign --sign "$SIGNING_IDENTITY" --timestamp "$stage/$name.dmg"
 fi
 if [ -n "${NOTARY_PROFILE:-}" ]; then
-  xcrun notarytool submit "$stage/$name.dmg" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun notarytool submit "$stage/$name.dmg" --keychain-profile "$NOTARY_PROFILE" --no-s3-acceleration --wait
   xcrun stapler staple "$stage/$name.dmg"
   xcrun stapler validate "$stage/$name.dmg"
 fi
