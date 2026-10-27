@@ -72,6 +72,7 @@ type Service struct {
 	cancelGeneration context.CancelFunc
 	closed           bool
 	disconnecting    bool
+	resuming         bool
 }
 
 var ErrUnauthorized = errors.New("agent is not authorized")
@@ -190,21 +191,43 @@ func (s *Service) State() map[string]any {
 	err := s.lastError
 	url := s.opt.LocalURL
 	transition := s.cfg.Transition
+	resuming, closed := s.resuming, s.closed
 	disconnected, pending, disconnecting := s.cfg.WhatsAppDisconnected, s.cfg.DisconnectPending, s.disconnecting
 	s.mu.Unlock()
-	status := engine.Status{Status: "disconnected", Detail: "Connect WhatsApp to import available history."}
+	status := engine.Status{SyncState: engine.SyncUnknown, Status: "disconnected", Detail: "Connect WhatsApp to import available history."}
 	if s.opt.Engine != nil {
 		status = s.opt.Engine.Status()
 	}
 	if disconnected {
-		status = engine.Status{Status: "disconnected", Detail: "WhatsApp is disconnected. Your archive stays on this Mac."}
+		syncState := engine.SyncUnknown
+		if status.SyncState == engine.SyncError {
+			syncState = engine.SyncError
+		}
+		status = engine.Status{SyncState: syncState, Status: "disconnected", Detail: "WhatsApp is disconnected. Your archive stays on this Mac."}
 		if pending {
 			// A failed or interrupted logout must still offer Disconnect on reopen.
-			status = engine.Status{Status: "attention", Linked: true, DisconnectPending: true, Detail: "WhatsApp sign-out is unfinished. Retry Disconnect."}
+			status = engine.Status{SyncState: syncState, Status: "attention", Linked: true, DisconnectPending: true, Detail: "WhatsApp sign-out is unfinished. Retry Disconnect."}
 		}
 		if disconnecting {
 			status.Status = "disconnecting"
 			status.Detail = "Signing out of this WhatsApp linked device."
+		}
+	}
+	status.SyncState = engine.NormalizeSyncState(status.SyncState)
+	if closed || transition || resuming || err != "" {
+		if status.SyncState != engine.SyncError {
+			status.SyncState = engine.SyncUnknown
+		}
+	}
+	if transition || resuming {
+		status.Status = "connecting"
+		status.Detail = "Reconnecting to WhatsApp and applying chat scope."
+	}
+	if status.SyncState == engine.SyncCaughtUp {
+		switch status.Status {
+		case "ready", "connected", "syncing", "importing", "receiving_history":
+		default:
+			status.SyncState = engine.SyncUnknown
 		}
 	}
 	mcpStatus := "ready"
@@ -237,12 +260,19 @@ func (s *Service) Resume(ctx context.Context, link bool) error {
 		s.mu.Unlock()
 		return errors.New("finish disconnecting WhatsApp before connecting again; retry Disconnect")
 	}
+	s.resuming = true
+	defer func() {
+		s.mu.Lock()
+		s.resuming = false
+		s.mu.Unlock()
+	}()
 	candidate := s.cfg
 	if link {
 		candidate.Linked = true
 		candidate.WhatsAppDisconnected = false
 	}
 	if err := AtomicJSON(filepath.Join(s.opt.DataDir, "settings.json"), candidate); err != nil {
+		s.lastError = err.Error()
 		s.mu.Unlock()
 		return err
 	}

@@ -22,7 +22,26 @@ type Chat struct {
 	Archived     bool     `json:"archived"`
 	LastActivity string   `json:"last_activity"`
 }
+
+const (
+	SyncUnknown  = "unknown"
+	Syncing      = "syncing"
+	SyncCaughtUp = "caught_up"
+	SyncError    = "error"
+)
+
+// NormalizeSyncState keeps older or unfamiliar engine values from implying success.
+func NormalizeSyncState(state string) string {
+	switch state {
+	case SyncUnknown, Syncing, SyncCaughtUp, SyncError:
+		return state
+	default:
+		return SyncUnknown
+	}
+}
+
 type Status struct {
+	SyncState         string `json:"sync_state"`
 	DisconnectPending bool   `json:"disconnect_pending,omitempty"`
 	Linked            bool   `json:"linked"`
 	Status            string `json:"status"`

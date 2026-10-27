@@ -625,10 +625,10 @@ index 52b0a38..561e489 100644
  
  			a, lk, err := newApp(ctx, flags, true, false)
 diff --git a/internal/app/app.go b/internal/app/app.go
-index 62746e9..7afe8af 100644
+index 62746e9..fd79b8e 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
-@@ -112,15 +112,17 @@ type WAClient interface {
+@@ -112,15 +112,20 @@ type WAClient interface {
  }
  
  type Options struct {
@@ -648,11 +648,14 @@ index 62746e9..7afe8af 100644
  }
  
  type App struct {
++	syncCompletionMu sync.Mutex
++	syncCompletion   *syncCompletion
++
 +	contentPolicy           *contentPolicy
  	opts                    Options
  	waMu                    sync.Mutex
  	wa                      WAClient
-@@ -165,6 +167,10 @@ type App struct {
+@@ -165,6 +170,10 @@ type App struct {
  }
  
  func New(opts Options) (*App, error) {
@@ -663,7 +666,7 @@ index 62746e9..7afe8af 100644
  	if opts.StoreDir == "" {
  		return nil, fmt.Errorf("store dir is required")
  	}
-@@ -189,7 +195,11 @@ func New(opts Options) (*App, error) {
+@@ -189,7 +198,11 @@ func New(opts Options) (*App, error) {
  
  	chatStateSync := make(chan struct{}, 1)
  	chatStateSync <- struct{}{}
@@ -676,6 +679,181 @@ index 62746e9..7afe8af 100644
  }
  
  func (a *App) OpenWA() error {
+diff --git a/internal/app/chat_state.go b/internal/app/chat_state.go
+index dd2e2a8..48c99b0 100644
+--- a/internal/app/chat_state.go
++++ b/internal/app/chat_state.go
+@@ -403,13 +403,13 @@ func (a *App) degradedAppStateReplay(ctx context.Context, collection appstate.WA
+ // without waiting for the answer, rate-limited per collection. whatsmeow
+ // adopts a late answer on its own when the snapshot is newer than the local
+ // state. The capture persists it in order and clears only covered replay debt.
+-func (a *App) requestBackgroundAppStateRecovery(ctx context.Context, collection appstate.WAPatchName, markerGeneration int64) {
++func (a *App) requestBackgroundAppStateRecovery(ctx context.Context, collection appstate.WAPatchName, markerGeneration int64) (resultErr error) {
+ 	name := string(collection)
+ 	now := time.Now()
+ 	a.appStateDegradedMu.Lock()
+ 	if last, ok := a.appStateRecoveryRequested[name]; ok && now.Sub(last) < backgroundAppStateRecoveryInterval {
+ 		a.appStateDegradedMu.Unlock()
+-		return
++		return nil
+ 	}
+ 	if a.appStateRecoveryRequested == nil {
+ 		a.appStateRecoveryRequested = make(map[string]time.Time)
+@@ -417,27 +417,33 @@ func (a *App) requestBackgroundAppStateRecovery(ctx context.Context, collection
+ 	a.appStateRecoveryRequested[name] = now
+ 	a.appStateDegradedMu.Unlock()
+ 
++	ctx, work := a.beginAppStateSyncWork(ctx, name)
++	defer func() { recordSyncFailure(ctx, resultErr); finishAppStateSyncWork(work, resultErr) }()
+ 	capture := a.newAppStateRecoveryCapture(collection)
+ 	requestID, err := a.wa.RequestAppStateRecovery(ctx, name)
+ 	if err != nil {
+ 		capture.stop()
+ 		a.warnAppStateRecovery(name, fmt.Errorf("background recovery request: %w", err))
+-		return
++		return err
++	}
++	if !a.adoptLateAppStateRecovery(collection, markerGeneration, capture) {
++		return context.Canceled
+ 	}
+-	a.adoptLateAppStateRecovery(collection, markerGeneration, capture)
+ 	a.emitWarning("app_state_recovery_requested_background",
+ 		fmt.Sprintf("app state %s: requested recovery snapshot from the primary in the background (id %s)", name, requestID),
+ 		map[string]any{"name": name, "id": string(requestID), "generation": markerGeneration})
++	return nil
+ }
+ 
+ func (a *App) recoverMismatchingAppState(ctx context.Context, collection appstate.WAPatchName, markerGeneration int64, tracker *appStatePersistenceTracker, onRequested func(types.MessageID)) error {
+ 	ticket := a.appStatePersist.reserve()
+ 	eventsToPersist, lateCapture, recoveryErr := a.waitForPrimaryAppStateRecovery(ctx, collection, onRequested)
++	latePending := false
+ 	if lateCapture != nil {
+ 		// The request reached the primary but the answer did not arrive in
+ 		// time. Keep the capture alive in a background continuation so a late
+ 		// answer still gets persisted and clears this attempt's markers.
+-		a.adoptLateAppStateRecovery(collection, markerGeneration, lateCapture)
++		latePending = a.adoptLateAppStateRecovery(collection, markerGeneration, lateCapture)
+ 	}
+ 	persistCtx := context.WithoutCancel(ctx)
+ 	result := make(chan error, 1)
+@@ -455,6 +461,11 @@ func (a *App) recoverMismatchingAppState(ctx context.Context, collection appstat
+ 		return fmt.Errorf("persist recovered app state %s: %w", collection, persistenceErr)
+ 	}
+ 	if recoveryErr != nil {
++		if latePending && syncWorkFrom(ctx) != nil {
++			// Sync tracks the adopted continuation as pending work. Standalone
++			// write commands still fail rather than proceeding before replay.
++			return nil
++		}
+ 		return recoveryErr
+ 	}
+ 	return a.clearCompletedAppStateRecovery(collection, markerGeneration)
+@@ -562,6 +573,8 @@ func (a *App) waitForPrimaryAppStateRecovery(ctx context.Context, collection app
+ // lateAppStateRecovery is a background continuation of a recovery attempt
+ // whose synchronous waiter timed out after the request was sent.
+ type lateAppStateRecovery struct {
++	syncCtx    context.Context
++	syncWork   *syncWork
+ 	capture    *appStateRecoveryCapture
+ 	generation int64
+ 	superseded chan struct{}
+@@ -570,18 +583,20 @@ type lateAppStateRecovery struct {
+ // adoptLateAppStateRecovery registers at most one continuation per collection;
+ // a newer attempt's higher generation supersedes an older one. The capture is
+ // dropped when the app is closing or an equal-or-newer continuation exists.
+-func (a *App) adoptLateAppStateRecovery(collection appstate.WAPatchName, generation int64, capture *appStateRecoveryCapture) {
++func (a *App) adoptLateAppStateRecovery(collection appstate.WAPatchName, generation int64, capture *appStateRecoveryCapture) bool {
+ 	a.appStateRecoveryMu.Lock()
+ 	if a.appStateRecoveryClosing {
+ 		a.appStateRecoveryMu.Unlock()
+ 		capture.stop()
+-		return
++		return false
+ 	}
++	syncCtx, work := a.beginAppStateSyncWork(context.Background(), string(collection))
+ 	if existing := a.lateRecoveries[string(collection)]; existing != nil {
+ 		if existing.generation >= generation {
+ 			a.appStateRecoveryMu.Unlock()
+ 			capture.stop()
+-			return
++			finishAppStateSyncWork(work, nil)
++			return true
+ 		}
+ 		close(existing.superseded)
+ 		delete(a.lateRecoveries, string(collection))
+@@ -592,16 +607,18 @@ func (a *App) adoptLateAppStateRecovery(collection appstate.WAPatchName, generat
+ 	if a.lateRecoveryStop == nil {
+ 		a.lateRecoveryStop = make(chan struct{})
+ 	}
+-	cont := &lateAppStateRecovery{capture: capture, generation: generation, superseded: make(chan struct{})}
++	cont := &lateAppStateRecovery{syncCtx: syncCtx, syncWork: work, capture: capture, generation: generation, superseded: make(chan struct{})}
+ 	a.lateRecoveries[string(collection)] = cont
+ 	stop := a.lateRecoveryStop
+ 	a.appStateRecoveryWorkers.Go(func() {
+ 		a.runLateAppStateRecovery(collection, cont, stop)
+ 	})
+ 	a.appStateRecoveryMu.Unlock()
++	return true
+ }
+ 
+-func (a *App) runLateAppStateRecovery(collection appstate.WAPatchName, cont *lateAppStateRecovery, stop <-chan struct{}) {
++func (a *App) runLateAppStateRecovery(collection appstate.WAPatchName, cont *lateAppStateRecovery, stop <-chan struct{}) (resultErr error) {
++	defer func() { finishAppStateSyncWork(cont.syncWork, resultErr) }()
+ 	timer := time.NewTimer(lateAppStateRecoveryMaxWait)
+ 	defer timer.Stop()
+ 	var completion appStateRecoveryCompletion
+@@ -610,20 +627,23 @@ func (a *App) runLateAppStateRecovery(collection appstate.WAPatchName, cont *lat
+ 	case <-cont.superseded:
+ 		// The superseding attempt already removed this entry from the registry.
+ 		cont.capture.stop()
+-		return
++		return nil
+ 	case <-stop:
+ 		a.finishLateAppStateRecovery(collection, cont)
+-		return
++		return context.Canceled
+ 	case <-timer.C:
+ 		a.finishLateAppStateRecovery(collection, cont)
+-		return
++		return context.DeadlineExceeded
+ 	}
+ 	a.finishLateAppStateRecovery(collection, cont)
+ 	// Same ordered persistence as the timely path. The write position was
+ 	// reserved when the sentinel was dispatched, so a newer live event that
+ 	// arrived after the snapshot persists after it, even though this goroutine
+ 	// runs outside whatsmeow's dispatch and holds no chatStateSync.
+-	persistCtx := context.Background()
++	persistCtx := cont.syncCtx
++	if persistCtx == nil {
++		persistCtx = context.Background()
++	}
+ 	tracker := &appStatePersistenceTracker{}
+ 	result := make(chan error, 1)
+ 	frontier := a.appStatePersist.complete(completion.ticket, func() {
+@@ -631,19 +651,20 @@ func (a *App) runLateAppStateRecovery(collection appstate.WAPatchName, cont *lat
+ 	})
+ 	if err := a.appStatePersist.waitThrough(persistCtx, frontier); err != nil {
+ 		a.warnAppStateRecovery(string(collection), err)
+-		return
++		return err
+ 	}
+ 	if persistenceErr := <-result; persistenceErr != nil {
+ 		a.warnAppStateRecovery(string(collection), fmt.Errorf("persist late recovered app state %s: %w", collection, persistenceErr))
+-		return
++		return persistenceErr
+ 	}
+ 	if err := a.clearCompletedAppStateRecovery(collection, cont.generation); err != nil {
+ 		a.warnAppStateRecovery(string(collection), err)
+-		return
++		return err
+ 	}
+ 	a.emitWarning("app_state_recovery_completed_late",
+ 		fmt.Sprintf("App state %s recovered late from primary", collection),
+ 		map[string]any{"name": string(collection), "generation": cont.generation})
++	return nil
+ }
+ 
+ func (a *App) finishLateAppStateRecovery(collection appstate.WAPatchName, cont *lateAppStateRecovery) {
 diff --git a/internal/app/content_policy.go b/internal/app/content_policy.go
 new file mode 100644
 index 0000000..0ed0dfa
@@ -1176,8 +1354,21 @@ index 26e1328..ab0cde2 100644
  	targetPath, err := a.ResolveMediaOutputPath(info, "")
  	if err != nil {
  		return "", 0, err
+diff --git a/internal/app/message_receipts.go b/internal/app/message_receipts.go
+index 035b7e5..b9b7bd7 100644
+--- a/internal/app/message_receipts.go
++++ b/internal/app/message_receipts.go
+@@ -74,7 +74,7 @@ func (a *App) handleOutgoingReceiptEvent(ctx context.Context, evt *events.Receip
+ 	}
+ 	for _, id := range evt.MessageIDs {
+ 		if err := a.db.UpsertMessageReceipt(chat, string(id), recipientJID, status, when); err != nil {
+-			a.emitWarning(
++			a.emitSyncWarning(ctx,
+ 				"message_receipt_store_failed",
+ 				fmt.Sprintf("warning: failed to store a %s receipt for chat %s: %v", status, chat, err),
+ 				map[string]any{"chat_jid": chat, "status": status, "error": err.Error()},
 diff --git a/internal/app/sync.go b/internal/app/sync.go
-index 6e700b0..7c356f0 100644
+index 6e700b0..71cbc84 100644
 --- a/internal/app/sync.go
 +++ b/internal/app/sync.go
 @@ -2,6 +2,7 @@ package app
@@ -1188,7 +1379,81 @@ index 6e700b0..7c356f0 100644
  	"errors"
  	"fmt"
  	"os"
-@@ -443,6 +444,16 @@ func (a *App) storeParsedMessage(ctx context.Context, pm wa.ParsedMessage, optio
+@@ -118,6 +119,22 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
+ 	syncCtx, cancel := context.WithCancel(ctx)
+ 	defer cancel()
+ 	limits := &syncStorageLimits{app: a, opts: opts, cancel: cancel}
++	completion, completionErr := a.startSyncCompletion(syncCtx)
++	if completionErr != nil {
++		return SyncResult{}, completionErr
++	}
++	var bootstrap *syncWork
++	startupCtx := syncCtx
++	if completion != nil {
++		startupCtx, bootstrap = completion.begin(syncCtx, "startup", "")
++	}
++	startupCompleted := false
++	defer func() {
++		if !startupCompleted {
++			bootstrap.finish(errors.New("sync startup interrupted"))
++		}
++	}()
++	defer func() { a.syncCompletionMu.Lock(); a.syncCompletion = nil; a.syncCompletionMu.Unlock() }()
+ 
+ 	if err := a.OpenWA(); err != nil {
+ 		return SyncResult{}, err
+@@ -199,14 +216,14 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
+ 	}()
+ 	now = nowUTC().UnixNano()
+ 	lastEvent.Store(now)
+-	if err := a.migrateHistoricalLIDs(syncCtx); err != nil {
++	if err := a.migrateHistoricalLIDs(startupCtx); err != nil {
+ 		return SyncResult{MessagesStored: messagesStored.Load()}, err
+ 	}
+-	a.syncAppStateDeltas(syncCtx, appStateRecoveries)
++	a.syncAppStateDeltas(startupCtx, appStateRecoveries)
+ 
+ 	// Optional: bootstrap imports (helps contacts/groups management without waiting for events).
+ 	if opts.RefreshContacts {
+-		if err := a.refreshContacts(syncCtx); err != nil {
++		if err := a.refreshContacts(startupCtx); err != nil {
+ 			a.emitWarning(
+ 				"refresh_contacts_failed",
+ 				fmt.Sprintf("warning: failed to refresh contacts: %v", err),
+@@ -215,7 +232,7 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
+ 		}
+ 	}
+ 	if opts.RefreshGroups {
+-		if err := a.refreshGroups(syncCtx); err != nil {
++		if err := a.refreshGroups(startupCtx); err != nil {
+ 			a.emitWarning(
+ 				"refresh_groups_failed",
+ 				fmt.Sprintf("warning: failed to refresh groups: %v", err),
+@@ -224,7 +241,7 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
+ 		}
+ 	}
+ 	if opts.RefreshChannels {
+-		if err := a.refreshNewsletters(syncCtx); err != nil {
++		if err := a.refreshNewsletters(startupCtx); err != nil {
+ 			a.emitWarning(
+ 				"refresh_channels_failed",
+ 				fmt.Sprintf("warning: failed to refresh channels: %v", err),
+@@ -233,11 +250,13 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
+ 		}
+ 	}
+ 	if opts.AfterConnect != nil {
+-		if err := opts.AfterConnect(syncCtx); err != nil {
++		if err := opts.AfterConnect(startupCtx); err != nil {
+ 			return SyncResult{MessagesStored: messagesStored.Load()}, err
+ 		}
+ 	}
+ 
++	startupCompleted = true
++	bootstrap.finish(nil)
+ 	var err error
+ 	if opts.Mode == SyncModeFollow {
+ 		_, err = a.runSyncFollow(syncCtx, opts.MaxReconnect, opts.PresenceMode, &messagesStored, &connectionEpoch, disconnected, loggedOut, staleReconnect)
+@@ -443,6 +462,16 @@ func (a *App) storeParsedMessage(ctx context.Context, pm wa.ParsedMessage, optio
  		}
  	}
  
@@ -1205,7 +1470,7 @@ index 6e700b0..7c356f0 100644
  	senderName := ""
  	if pm.FromMe {
  		senderName = "me"
-@@ -596,6 +607,10 @@ func (a *App) storeParsedCallEvent(ctx context.Context, call wa.ParsedCallEvent,
+@@ -596,6 +625,10 @@ func (a *App) storeParsedCallEvent(ctx context.Context, call wa.ParsedCallEvent,
  		return err
  	}
  
@@ -1216,12 +1481,876 @@ index 6e700b0..7c356f0 100644
  	senderJID := strings.TrimSpace(call.SenderJID)
  	if senderJID != "" {
  		if jid, err := types.ParseJID(senderJID); err == nil {
+diff --git a/internal/app/sync_completion.go b/internal/app/sync_completion.go
+new file mode 100644
+index 0000000..5115051
+--- /dev/null
++++ b/internal/app/sync_completion.go
+@@ -0,0 +1,418 @@
++package app
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/openclaw/wacli/internal/wa"
++	"go.mau.fi/whatsmeow/types/events"
++	"google.golang.org/protobuf/proto"
++)
++
++// A delivery boundary and a durable application work journal serve different
++// purposes: the former orders network receives; the latter survives a failed
++// download/write and cannot be forgiven just by opening a fresh socket.
++type syncDebt struct {
++	Chat   string `json:"chat,omitempty"`
++	Failed bool   `json:"failed,omitempty"`
++}
++type syncCompletion struct {
++	mu                  sync.Mutex
++	app                 *App
++	runID               string
++	revision            int64
++	connection          uint64
++	connectionVersion   uint64
++	connected, boundary bool
++	ended               bool
++	pending             uint64
++	active              int
++	debts               map[string]syncDebt
++	activeKeys          map[string]int
++	journalFailed       bool
++	lastState           string
++	path                string
++}
++type syncWorkContextKey struct{}
++type syncWork struct {
++	tracker *syncCompletion
++	key     string
++	mu      sync.Mutex
++	refs    int
++	failed  bool
++}
++
++func (a *App) startSyncCompletion(ctx context.Context) (*syncCompletion, error) {
++	if a.contentPolicy == nil {
++		return nil, nil
++	}
++	t := &syncCompletion{app: a, runID: os.Getenv("WACLI_SYNC_RUN_ID"), debts: map[string]syncDebt{}, activeKeys: map[string]int{}, path: filepath.Join(a.opts.StoreDir, "sync-debts.json")}
++	if a.contentPolicy != nil {
++		t.revision = a.contentPolicy.Revision
++	}
++	body, err := os.ReadFile(t.path)
++	if err == nil {
++		if json.Unmarshal(body, &t.debts) != nil || t.debts == nil {
++			return nil, errors.New("sync recovery journal is unreadable; preserve the archive and repair its sync-debts.json file")
++		}
++	} else if !os.IsNotExist(err) {
++		return nil, err
++	}
++	for key, debt := range t.debts {
++		if debt.Chat != "" && a.CheckContentScope(ctx, debt.Chat) != nil {
++			delete(t.debts, key)
++		}
++	}
++	if err := t.saveLocked(); err != nil {
++		return nil, errors.New("sync recovery journal cannot be saved; check its file permissions")
++	}
++	a.syncCompletionMu.Lock()
++	a.syncCompletion = t
++	a.syncCompletionMu.Unlock()
++	t.mu.Lock()
++	t.emitLocked("sync_state")
++	t.mu.Unlock()
++	go func() {
++		ticker := time.NewTicker(5 * time.Second)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-ctx.Done():
++				return
++			case <-ticker.C:
++				t.snapshot(func() bool { return a.wa != nil && a.wa.IsConnected() && a.wa.IsAuthed() })
++			}
++		}
++	}()
++	return t, nil
++}
++
++// Connection checks acquire upstream socket locks, so run them outside the
++// completion mutex. A sample may only invalidate the exact connection state it
++// observed; an intervening Connected event must not be erased by an older read.
++func (t *syncCompletion) snapshot(healthy func() bool) {
++	t.mu.Lock()
++	version, wasConnected := t.connectionVersion, t.connected
++	t.mu.Unlock()
++	connectionHealthy := true
++	if wasConnected {
++		connectionHealthy = healthy()
++	}
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	if wasConnected && !connectionHealthy && version == t.connectionVersion {
++		t.connectionVersion++
++		t.connected = false
++		t.ended = true
++		t.boundary = false
++		t.app.emitOrPrint("connection_check_failed", map[string]any{"run_id": t.runID, "revision": t.revision, "connection_id": t.connection}, "\nWhatsApp connection check failed.\n")
++		t.emitLocked("sync_state")
++	}
++	t.emitLocked("sync_snapshot")
++}
++
++func (t *syncCompletion) stateLocked() string {
++	if t.journalFailed {
++		return "error"
++	}
++	for key, debt := range t.debts {
++		if debt.Failed || t.activeKeys[key] == 0 {
++			return "error"
++		}
++	}
++	if !t.connected {
++		return "unknown"
++	}
++	if !t.boundary || t.pending > 0 || t.active > 0 {
++		return "syncing"
++	}
++	return "caught_up"
++}
++func (t *syncCompletion) dataLocked() map[string]any {
++	return map[string]any{"run_id": t.runID, "revision": t.revision, "connection_id": t.connection, "state": t.stateLocked()}
++}
++func (t *syncCompletion) emitLocked(event string) {
++	if event == "sync_state" && t.connected && t.boundary && t.pending == 0 && t.active == 0 && !t.journalFailed {
++		ready := true
++		for key := range t.debts {
++			if key != "sync-marker" {
++				ready = false
++				break
++			}
++		}
++		if ready {
++			if err := t.app.db.RecordSuccessfulSync(nowUTC()); err != nil {
++				t.debts["sync-marker"] = syncDebt{Failed: true}
++				if t.saveLocked() != nil {
++					t.journalFailed = true
++				}
++			} else if _, exists := t.debts["sync-marker"]; exists {
++				delete(t.debts, "sync-marker")
++				if t.saveLocked() != nil {
++					t.journalFailed = true
++				}
++			}
++		}
++	}
++	state := t.stateLocked()
++	if event == "sync_state" && state == t.lastState {
++		return
++	}
++	data := t.dataLocked()
++	data["state"] = state
++	t.app.emitEvent(event, data)
++	if event == "sync_state" {
++		t.lastState = state
++	}
++}
++
++func (t *syncCompletion) receive(v *events.DeliveryState) {
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	if v.ConnectionID < t.connection || (v.ConnectionID == t.connection && t.ended) {
++		return
++	}
++	if v.ConnectionID > t.connection {
++		t.connectionVersion++
++		t.connection = v.ConnectionID
++		t.ended = false
++		t.connected = false
++		t.boundary = false
++		t.lastState = ""
++	}
++	t.pending = v.Pending
++	t.boundary = v.Boundary
++	if v.Failed {
++		t.debts["receive-decode"] = syncDebt{Failed: true}
++		if t.saveLocked() != nil {
++			t.journalFailed = true
++		}
++	}
++	t.emitLocked("sync_state")
++}
++func (t *syncCompletion) connectionEvent(id uint64, connected bool) map[string]any {
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	if id >= t.connection && !(id == t.connection && t.ended && connected) {
++		t.connectionVersion++
++		if id > t.connection {
++			t.connection = id
++			t.ended = false
++			t.boundary = false
++			t.pending = 0
++			t.lastState = ""
++		}
++		t.connected = connected
++		if !connected {
++			t.ended = true
++			t.boundary = false
++		}
++		if connected {
++			t.app.emitOrPrint("connected", map[string]any{"run_id": t.runID, "revision": t.revision, "connection_id": id}, "\nConnected.\n")
++		} else {
++			t.app.emitOrPrint("disconnected", map[string]any{"run_id": t.runID, "revision": t.revision, "connection_id": id}, "\nDisconnected.\n")
++		}
++		t.emitLocked("sync_state")
++	}
++	return map[string]any{"run_id": t.runID, "revision": t.revision, "connection_id": id}
++}
++func (t *syncCompletion) saveLocked() error {
++	body, err := json.Marshal(t.debts)
++	if err != nil {
++		return err
++	}
++	f, err := os.CreateTemp(filepath.Dir(t.path), ".sync-debts-")
++	if err != nil {
++		return err
++	}
++	name := f.Name()
++	defer os.Remove(name)
++	if err = f.Chmod(0600); err == nil {
++		_, err = f.Write(body)
++	}
++	if err == nil {
++		err = f.Sync()
++	}
++	closeErr := f.Close()
++	if err == nil {
++		err = closeErr
++	}
++	if err == nil {
++		err = os.Rename(name, t.path)
++	}
++	if err == nil {
++		dir, openErr := os.Open(filepath.Dir(t.path))
++		if openErr != nil {
++			return openErr
++		}
++		err = dir.Sync()
++		closeErr := dir.Close()
++		if err == nil {
++			err = closeErr
++		}
++	}
++	return err
++}
++func (t *syncCompletion) begin(ctx context.Context, key, chat string) (context.Context, *syncWork) {
++	if key == "" {
++		return ctx, nil
++	}
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	t.active++
++	t.activeKeys[key]++
++	debt := t.debts[key]
++	debt.Chat = chat
++	t.debts[key] = debt
++	w := &syncWork{tracker: t, key: key, refs: 1}
++	if t.saveLocked() != nil {
++		t.journalFailed = true
++		w.failed = true
++	} else {
++		t.journalFailed = false
++	}
++	t.emitLocked("sync_state")
++	return context.WithValue(ctx, syncWorkContextKey{}, w), w
++}
++func (w *syncWork) hold() func(error) {
++	if w == nil {
++		return func(error) {}
++	}
++	w.mu.Lock()
++	w.refs++
++	w.mu.Unlock()
++	return func(err error) { w.finish(err) }
++}
++func (w *syncWork) finish(err error) {
++	if w == nil {
++		return
++	}
++	w.mu.Lock()
++	if err != nil {
++		w.failed = true
++	}
++	w.refs--
++	if w.refs > 0 {
++		w.mu.Unlock()
++		return
++	}
++	failed := w.failed
++	w.mu.Unlock()
++	t := w.tracker
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	t.active--
++	t.activeKeys[w.key]--
++	if failed {
++		debt := t.debts[w.key]
++		debt.Failed = true
++		t.debts[w.key] = debt
++	} else if t.activeKeys[w.key] == 0 {
++		delete(t.debts, w.key)
++	}
++	if t.saveLocked() != nil {
++		t.journalFailed = true
++	} else {
++		t.journalFailed = false
++	}
++	t.emitLocked("sync_state")
++}
++func syncWorkFrom(ctx context.Context) *syncWork {
++	w, _ := ctx.Value(syncWorkContextKey{}).(*syncWork)
++	return w
++}
++func recordSyncFailure(ctx context.Context, err error) {
++	if err == nil || errors.Is(err, errContentSkipped) {
++		return
++	}
++	if w := syncWorkFrom(ctx); w != nil {
++		w.mu.Lock()
++		w.failed = true
++		w.mu.Unlock()
++	}
++}
++func (a *App) emitSyncWarning(ctx context.Context, code, message string, data map[string]any) {
++	if (strings.HasSuffix(code, "_failed") && code != "history_delete_failed" && code != "send_presence_failed") || strings.HasPrefix(code, "encrypted_edit_") {
++		recordSyncFailure(ctx, errors.New(code))
++	}
++	a.emitWarning(code, message, data)
++}
++func hashSyncProto(value proto.Message) string {
++	body, _ := proto.MarshalOptions{Deterministic: true}.Marshal(value)
++	sum := sha256.Sum256(body)
++	return hex.EncodeToString(sum[:])
++}
++func (a *App) beginSyncEvent(ctx context.Context, evt any) (context.Context, *syncWork) {
++	a.syncCompletionMu.Lock()
++	t := a.syncCompletion
++	a.syncCompletionMu.Unlock()
++	if t == nil {
++		return ctx, nil
++	}
++	var key, chat string
++	switch v := evt.(type) {
++	case *events.Message:
++		if n := historySyncNotificationFromMessage(v); n != nil {
++			key = "history:" + hashSyncProto(n)
++		} else {
++			chat = canonicalJIDString(a.canonicalStoreJID(ctx, v.Info.Chat))
++			if a.CheckContentScope(ctx, chat) != nil {
++				return ctx, nil
++			}
++			key = "message:" + chat + ":" + string(v.Info.ID)
++		}
++	case *events.AppStateSyncError:
++		key = "app-state-recovery:" + string(v.Name)
++	case *events.HistorySync:
++		key = "history-data:" + hashSyncProto(v.Data)
++	case *events.UndecryptableMessage:
++		chat = canonicalJIDString(a.canonicalStoreJID(ctx, v.Info.Chat))
++		if a.CheckContentScope(ctx, chat) != nil {
++			return ctx, nil
++		}
++		key = "message:" + chat + ":" + string(v.Info.ID)
++	case *events.CallOffer, *events.CallAccept, *events.CallPreAccept, *events.CallTransport, *events.CallOfferNotice, *events.CallRelayLatency, *events.CallTerminate, *events.CallReject,
++		*events.AppState, *events.Star, *events.DeleteForMe, *events.Archive, *events.UnarchiveChatsSetting, *events.Pin, *events.Mute, *events.MarkChatAsRead, *events.Contact, *events.Receipt:
++		body, _ := json.Marshal(evt)
++		sum := sha256.Sum256(body)
++		key = "event:" + hex.EncodeToString(sum[:])
++	}
++	return t.begin(ctx, key, chat)
++}
++
++// Mutations of an existing row carry their own recovery identity: replaying the
++// old original message cannot recover an edit that was never saved.
++func (a *App) parsedSyncKey(ctx context.Context, pm wa.ParsedMessage) string {
++	key := "message:" + canonicalJIDString(a.canonicalStoreJID(ctx, pm.Chat)) + ":" + pm.ID
++	if pm.Edited || pm.Revoked {
++		body, _ := json.Marshal(struct {
++			Edited, Revoked bool
++			Text            string
++			Media           *wa.Media
++			Location        *wa.Location
++			Buttons         []wa.Button
++		}{pm.Edited, pm.Revoked, pm.Text, pm.Media, pm.Location, pm.Buttons})
++		sum := sha256.Sum256(body)
++		key += ":mutation:" + hex.EncodeToString(sum[:])
++	}
++	return key
++}
++func (a *App) beginParsedSyncWork(ctx context.Context, pm wa.ParsedMessage) (context.Context, *syncWork) {
++	a.syncCompletionMu.Lock()
++	t := a.syncCompletion
++	a.syncCompletionMu.Unlock()
++	key := a.parsedSyncKey(ctx, pm)
++	current := syncWorkFrom(ctx)
++	if t != nil && (current == nil || current.key != key) && a.CheckContentScope(ctx, pm.Chat.String()) == nil {
++		return t.begin(ctx, key, canonicalJIDString(a.canonicalStoreJID(ctx, pm.Chat)))
++	}
++	return ctx, nil
++}
+diff --git a/internal/app/sync_completion_test.go b/internal/app/sync_completion_test.go
+new file mode 100644
+index 0000000..c84cf51
+--- /dev/null
++++ b/internal/app/sync_completion_test.go
+@@ -0,0 +1,295 @@
++package app
++
++import (
++	"bytes"
++	"context"
++	"database/sql"
++	"encoding/json"
++	"errors"
++	"github.com/openclaw/wacli/internal/out"
++	"github.com/openclaw/wacli/internal/wa"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++	"go.mau.fi/whatsmeow/proto/waHistorySync"
++	"go.mau.fi/whatsmeow/types"
++	"go.mau.fi/whatsmeow/types/events"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++)
++
++func completionFixture(t *testing.T) (*App, *fakeWA, *syncCompletion, *bytes.Buffer) {
++	t.Helper()
++	a, f := offlineTestApp(t, &webhookEventRecorder{})
++	a.contentPolicy = &contentPolicy{Version: 1, Revision: 7, Mode: "all"}
++	output := &bytes.Buffer{}
++	a.opts.Events = out.NewEventWriter(output, true)
++	ctx, cancel := context.WithCancel(t.Context())
++	t.Cleanup(cancel)
++	tracker, err := a.startSyncCompletion(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return a, f, tracker, output
++}
++func completionState(t *testing.T, tracker *syncCompletion) string {
++	t.Helper()
++	tracker.mu.Lock()
++	defer tracker.mu.Unlock()
++	return tracker.stateLocked()
++}
++func completionReady(f *fakeWA) {
++	f.emit(&events.DeliveryState{ConnectionID: 1, Received: 1, Boundary: true})
++	f.emit(&events.Connected{DeliveryConnectionID: 1})
++}
++func TestSyncCompletionEmptyBoundaryAndQuietSnapshots(t *testing.T) {
++	_, f, tracker, output := completionFixture(t)
++	completionReady(f)
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatalf("empty backlog=%s", got)
++	}
++	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
++	connectedIndex, readyIndex := -1, -1
++	for i, line := range lines {
++		var event struct {
++			Event string `json:"event"`
++			Data  struct {
++				State string `json:"state"`
++			} `json:"data"`
++		}
++		if json.Unmarshal([]byte(line), &event) != nil {
++			continue
++		}
++		if event.Event == "connected" {
++			connectedIndex = i
++		}
++		if event.Event == "sync_state" && event.Data.State == "caught_up" {
++			readyIndex = i
++		}
++	}
++	if connectedIndex < 0 || readyIndex <= connectedIndex {
++		t.Fatalf("completion preceded connection: %s", output.String())
++	}
++	tracker.mu.Lock()
++	for range 3 {
++		tracker.emitLocked("sync_snapshot")
++	}
++	tracker.mu.Unlock()
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatalf("quiet snapshots=%s", got)
++	}
++}
++func TestSyncCompletionWaitsForReceiveAndOrderedWrites(t *testing.T) {
++	_, f, tracker, _ := completionFixture(t)
++	f.emit(&events.Connected{DeliveryConnectionID: 1})
++	f.emit(&events.DeliveryState{ConnectionID: 1, Received: 3, Pending: 1, Boundary: true})
++	if got := completionState(t, tracker); got != "syncing" {
++		t.Fatal(got)
++	}
++	_, work := tracker.begin(t.Context(), "pending-write", "")
++	finishWrite := work.hold()
++	work.finish(nil)
++	f.emit(&events.DeliveryState{ConnectionID: 1, Received: 3, Pending: 0, Boundary: true})
++	if got := completionState(t, tracker); got != "syncing" {
++		t.Fatalf("pending write=%s", got)
++	}
++	finishWrite(nil)
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatalf("saved work=%s", got)
++	}
++	_, work = tracker.begin(t.Context(), "later-history", "")
++	if got := completionState(t, tracker); got != "syncing" {
++		t.Fatalf("later history=%s", got)
++	}
++	work.finish(nil)
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatal(got)
++	}
++}
++func TestSyncCompletionDebtSurvivesRestartAndOnlyItsRecoveryClears(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	_, work := tracker.begin(t.Context(), "failed-download", "")
++	work.finish(errors.New("synthetic download failure"))
++	if got := completionState(t, tracker); got != "error" {
++		t.Fatalf("failed work=%s", got)
++	}
++	f.emit(&events.Disconnected{DeliveryConnectionID: 1})
++	f.emit(&events.Connected{DeliveryConnectionID: 2})
++	f.emit(&events.DeliveryState{ConnectionID: 2, Boundary: true})
++	if got := completionState(t, tracker); got != "error" {
++		t.Fatalf("reconnection forgave error=%s", got)
++	}
++	next, err := a.startSyncCompletion(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	next.receive(&events.DeliveryState{ConnectionID: 1, Boundary: true})
++	next.connectionEvent(1, true)
++	if got := completionState(t, next); got != "error" {
++		t.Fatalf("restart forgave debt=%s", got)
++	}
++	_, unrelated := next.begin(t.Context(), "unrelated-message", "")
++	unrelated.finish(nil)
++	if got := completionState(t, next); got != "error" {
++		t.Fatalf("unrelated work forgave debt=%s", got)
++	}
++	_, retry := next.begin(t.Context(), "failed-download", "")
++	if got := completionState(t, next); got != "error" {
++		t.Fatalf("pending retry forgave error=%s", got)
++	}
++	retry.finish(nil)
++	if got := completionState(t, next); got != "caught_up" {
++		t.Fatalf("successful recovery=%s", got)
++	}
++}
++func TestSyncCompletionHistoryWriteRecoversThroughLiveRetry(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	raw, err := sql.Open("sqlite3", filepath.Join(a.opts.StoreDir, "wacli.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer raw.Close()
++	if _, err = raw.Exec(`CREATE TRIGGER fail_completion_message BEFORE INSERT ON messages BEGIN SELECT RAISE(FAIL, 'synthetic message write failure'); END`); err != nil {
++		t.Fatal(err)
++	}
++	chat := types.NewJID("15551234567", types.DefaultUserServer)
++	f.emit(historySyncWithTextMessages(chat, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), "retry-message"))
++	if got := completionState(t, tracker); got != "error" {
++		t.Fatalf("history write failure=%s", got)
++	}
++	if _, err = raw.Exec(`DROP TRIGGER fail_completion_message`); err != nil {
++		t.Fatal(err)
++	}
++	f.emit(offlineTestMessage("unrelated"))
++	if got := completionState(t, tracker); got != "error" {
++		t.Fatalf("unrelated write=%s", got)
++	}
++	f.emit(offlineTestMessage("retry-message"))
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatalf("recovered history message=%s debts=%+v", got, tracker.debts)
++	}
++}
++func TestSyncCompletionSelectedUndecryptableAndHistoryDownload(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	a.contentPolicy.Mode = "selected"
++	a.contentPolicy.ChatIDs = []string{"15551234567@s.whatsapp.net"}
++	a.contentPolicy.allowed = map[string]struct{}{"15551234567@s.whatsapp.net": {}}
++	completionReady(f)
++	excluded := types.NewJID("15550000000", types.DefaultUserServer)
++	f.emit(&events.UndecryptableMessage{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: excluded, Sender: excluded}, ID: "excluded"}})
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatalf("scope exclusion=%s", got)
++	}
++	selected := types.NewJID("15551234567", types.DefaultUserServer)
++	f.emit(&events.UndecryptableMessage{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: selected, Sender: selected}, ID: "decrypt-retry"}})
++	if got := completionState(t, tracker); got != "error" {
++		t.Fatalf("undecryptable selected=%s", got)
++	}
++	f.emit(offlineTestMessage("decrypt-retry"))
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatalf("readable retry=%s", got)
++	}
++	notif := &waE2E.HistorySyncNotification{}
++	f.downloadHistory = func(*waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
++		return nil, errors.New("synthetic history download failure")
++	}
++	msg := offlineTestMessage("history")
++	msg.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{HistorySyncNotification: notif}}
++	f.emit(msg)
++	if got := completionState(t, tracker); got != "error" {
++		t.Fatalf("download failure=%s", got)
++	}
++	f.downloadHistory = func(*waE2E.HistorySyncNotification) (*waHistorySync.HistorySync, error) {
++		return &waHistorySync.HistorySync{}, nil
++	}
++	f.emit(msg)
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatalf("download recovered=%s", got)
++	}
++}
++func TestSyncCompletionOldGenerationCannotRestoreBoundary(t *testing.T) {
++	_, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	f.emit(&events.Disconnected{DeliveryConnectionID: 1})
++	f.emit(&events.Connected{DeliveryConnectionID: 2})
++	f.emit(&events.DeliveryState{ConnectionID: 1, Boundary: true})
++	f.emit(&events.Connected{DeliveryConnectionID: 1})
++	if got := completionState(t, tracker); got != "syncing" {
++		t.Fatalf("old generation restored completion=%s", got)
++	}
++	f.emit(&events.DeliveryState{ConnectionID: 2, Boundary: true})
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatal(got)
++	}
++}
++func TestSyncCompletionPollFailureCannotBecomeSuccess(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	raw, err := sql.Open("sqlite3", filepath.Join(a.opts.StoreDir, "wacli.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer raw.Close()
++	if _, err = raw.Exec(`CREATE TRIGGER fail_completion_poll BEFORE INSERT ON polls BEGIN SELECT RAISE(FAIL, 'synthetic poll write failure'); END`); err != nil {
++		t.Fatal(err)
++	}
++	ctx, work := tracker.begin(t.Context(), "poll-work", "")
++	a.upsertPollFromParsed(ctx, wa.ParsedMessage{Chat: types.NewJID("15551234567", types.DefaultUserServer), ID: "poll-1", Timestamp: time.Now(), Poll: &wa.Poll{Question: "Synthetic", Options: []string{"A", "B"}, SelectableCount: 1}})
++	work.finish(nil)
++	if got := completionState(t, tracker); got != "error" {
++		t.Fatalf("poll write failure=%s", got)
++	}
++	if _, err = raw.Exec(`DROP TRIGGER fail_completion_poll`); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestSyncCompletionEndedGenerationCannotReopen(t *testing.T) {
++	_, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	f.emit(&events.Disconnected{DeliveryConnectionID: 1})
++	f.emit(&events.DeliveryState{ConnectionID: 1, Boundary: true})
++	f.emit(&events.Connected{DeliveryConnectionID: 1})
++	if got := completionState(t, tracker); got != "unknown" {
++		t.Fatalf("ended connection reopened=%s", got)
++	}
++	f.emit(&events.Connected{DeliveryConnectionID: 2})
++	f.emit(&events.DeliveryState{ConnectionID: 2, Boundary: true})
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatal(got)
++	}
++}
++func TestSyncCompletionFailedEditNeedsItsActualRecovery(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	f.emit(offlineTestMessage("edit-target"))
++	raw, err := sql.Open("sqlite3", filepath.Join(a.opts.StoreDir, "wacli.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer raw.Close()
++	if _, err = raw.Exec(`CREATE TRIGGER fail_completion_edit BEFORE INSERT ON messages BEGIN SELECT RAISE(FAIL, 'synthetic edit failure'); END`); err != nil {
++		t.Fatal(err)
++	}
++	edited := wa.ParseLiveMessage(offlineTestMessage("edit-target"))
++	edited.Edited = true
++	edited.Text = "Updated synthetic text"
++	if err = a.storeParsedMessageForSync(t.Context(), edited, messageStoreOptions{}); err == nil {
++		t.Fatal("edit unexpectedly saved")
++	}
++	if _, err = raw.Exec(`DROP TRIGGER fail_completion_edit`); err != nil {
++		t.Fatal(err)
++	}
++	f.emit(offlineTestMessage("edit-target"))
++	if got := completionState(t, tracker); got != "error" {
++		t.Fatalf("original replay forgave missing edit=%s", got)
++	}
++	if err = a.storeParsedMessageForSync(t.Context(), edited, messageStoreOptions{}); err != nil {
++		t.Fatal(err)
++	}
++	if got := completionState(t, tracker); got != "caught_up" {
++		t.Fatalf("actual edit recovery=%s", got)
++	}
++}
+diff --git a/internal/app/sync_edits.go b/internal/app/sync_edits.go
+index 33be489..9155ea6 100644
+--- a/internal/app/sync_edits.go
++++ b/internal/app/sync_edits.go
+@@ -95,7 +95,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 	secret := evt.Message.GetSecretEncryptedMessage()
+ 	target := secret.GetTargetMessageKey()
+ 	if strings.TrimSpace(target.GetID()) == "" {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_invalid_target",
+ 			fmt.Sprintf("warning: encrypted edit %s has no target message ID", messageID),
+ 			map[string]any{"message_id": messageID},
+@@ -104,7 +104,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 	}
+ 	decrypted, err := a.wa.DecryptSecretEncryptedMessage(ctx, evt)
+ 	if err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_decrypt_failed",
+ 			fmt.Sprintf("warning: failed to decrypt message edit %s: %v", messageID, err),
+ 			map[string]any{"message_id": messageID, "error": err.Error()},
+@@ -113,7 +113,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 	}
+ 	protocol := decrypted.GetProtocolMessage()
+ 	if protocol.GetType() != waE2E.ProtocolMessage_MESSAGE_EDIT || protocol.GetEditedMessage() == nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_invalid_payload",
+ 			fmt.Sprintf("warning: encrypted edit %s decrypted to an unexpected payload", messageID),
+ 			map[string]any{"message_id": messageID},
+@@ -121,7 +121,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 		return nil, false
+ 	}
+ 	if decryptedTarget := strings.TrimSpace(protocol.GetKey().GetID()); decryptedTarget != "" && decryptedTarget != target.GetID() {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_target_mismatch",
+ 			fmt.Sprintf("warning: encrypted edit %s target does not match decrypted payload", messageID),
+ 			map[string]any{"message_id": messageID},
+@@ -129,7 +129,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 		return nil, false
+ 	}
+ 	if !a.secretEditChatMatches(ctx, evt, target) {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_chat_mismatch",
+ 			fmt.Sprintf("warning: encrypted edit %s target chat does not match the authenticated chat", messageID),
+ 			map[string]any{"message_id": messageID},
+@@ -137,7 +137,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 		return nil, false
+ 	}
+ 	if !a.secretEditSenderMatches(ctx, evt, target) {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_sender_mismatch",
+ 			fmt.Sprintf("warning: encrypted edit %s sender does not own the target message", messageID),
+ 			map[string]any{"message_id": messageID},
+@@ -145,7 +145,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 		return nil, false
+ 	}
+ 	if containsNestedProtocolMutation(protocol.GetEditedMessage()) {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_nested_mutation",
+ 			fmt.Sprintf("warning: encrypted edit %s contains a nested protocol mutation", messageID),
+ 			map[string]any{"message_id": messageID},
+@@ -159,7 +159,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 		if payload == "" {
+ 			payload = "empty message"
+ 		}
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_unhandled_payload",
+ 			fmt.Sprintf("warning: encrypted edit %s contains unsupported payload %s", messageID, payload),
+ 			map[string]any{"message_id": messageID, "payload": payload},
+@@ -170,7 +170,7 @@ func (a *App) decryptSecretEdit(ctx context.Context, evt *events.Message) (*even
+ 	if err != nil || !parsed.Edited || parsed.Revoked || parsed.ID != target.GetID() || parsed.FromMe != evt.Info.IsFromMe ||
+ 		!a.sameCanonicalIdentity(ctx, evt.Info.Chat, parsed.Chat) ||
+ 		!a.sameCanonicalIdentity(ctx, evt.Info.Sender, parsedSender) {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_edit_final_target_mismatch",
+ 			fmt.Sprintf("warning: encrypted edit %s changed identity while parsing", messageID),
+ 			map[string]any{"message_id": messageID},
 diff --git a/internal/app/sync_events.go b/internal/app/sync_events.go
-index 68a076b..cbe8c03 100644
+index 68a076b..f8d83ed 100644
 --- a/internal/app/sync_events.go
 +++ b/internal/app/sync_events.go
-@@ -137,7 +137,7 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+@@ -63,6 +63,9 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 		enqueueWebhookMessage = func(wa.ParsedMessage) {}
+ 	}
+ 	handlerID := a.wa.AddEventHandler(func(evt any) {
++		workCtx, work := a.beginSyncEvent(ctx, evt)
++		ctx := workCtx
++		defer work.finish(nil)
+ 		if mediaQ != nil {
+ 			if !mediaQ.beginProducer() {
+ 				return
+@@ -79,6 +82,7 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 			if r := recover(); r != nil {
+ 				if limits != nil {
+ 					limits.persistenceFailed.Store(true)
++					recordSyncFailure(ctx, errors.New("event handler panic"))
+ 				}
+ 				n := panicCount.Add(1)
+ 				if a.eventsEnabled() {
+@@ -95,6 +99,13 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 			}
+ 		}()
+ 		switch v := evt.(type) {
++		case *events.DeliveryState:
++			a.syncCompletionMu.Lock()
++			t := a.syncCompletion
++			a.syncCompletionMu.Unlock()
++			if t != nil {
++				t.receive(v)
++			}
+ 		case *events.Message:
+ 			lastEvent.Store(nowUTC().UnixNano())
+ 			if notif := historySyncNotificationFromMessage(v); notif != nil {
+@@ -108,7 +119,7 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 		case *events.CallOffer, *events.CallAccept, *events.CallPreAccept, *events.CallTransport,
+ 			*events.CallOfferNotice, *events.CallRelayLatency, *events.CallTerminate, *events.CallReject:
+ 			lastEvent.Store(nowUTC().UnixNano())
+-			a.handleLiveCallEvent(ctx, v)
++			recordSyncFailure(ctx, a.handleLiveCallEvent(ctx, v))
+ 		case *events.AppState, *events.Star, *events.DeleteForMe,
+ 			*events.Archive, *events.UnarchiveChatsSetting, *events.Pin, *events.Mute, *events.MarkChatAsRead,
+ 			*events.Contact:
+@@ -116,7 +127,9 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 			if limits != nil {
+ 				limits.appStatePending.Add(1)
+ 			}
++			finishWrite := work.hold()
+ 			a.handleAppStatePersistenceEvent(ctx, v, func(err error) {
++				finishWrite(err)
+ 				if limits != nil {
+ 					if err != nil {
+ 						limits.persistenceFailed.Store(true)
+@@ -135,9 +148,10 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 			lastEvent.Store(nowUTC().UnixNano())
+ 			a.handleReceiptPersistenceEvent(ctx, v)
  			if err := a.handleOutgoingReceiptEvent(ctx, v); err != nil && limits != nil {
++				recordSyncFailure(ctx, err)
  				limits.persistenceFailed.Store(true)
  			}
 -			if opts.WebhookEvents.Enabled(SyncWebhookEventReceipt) {
@@ -1229,7 +2358,7 @@ index 68a076b..cbe8c03 100644
  				if job, ok := newSyncWebhookReceiptEvent(v); ok {
  					enqueueWebhook(job)
  				}
-@@ -145,7 +145,7 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+@@ -145,7 +159,7 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
  		case *events.ChatPresence:
  			// Deliberately does not touch lastEvent: typing notifications must
  			// not keep an idle-exit sync alive.
@@ -1238,7 +2367,141 @@ index 68a076b..cbe8c03 100644
  				if job, ok := newSyncWebhookChatPresenceEvent(v); ok {
  					enqueueWebhook(job)
  				}
-@@ -580,6 +580,9 @@ func (a *App) linkedLiveCallIdentity() types.JID {
+@@ -174,8 +188,9 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 			// hole in a chat is never silent, and say which recovery this event
+ 			// actually gets: they are not the same.
+ 			lastEvent.Store(nowUTC().UnixNano())
++			recordSyncFailure(ctx, errors.New("message has not been decrypted"))
+ 			recovery, warning := undecryptableWarning(v)
+-			a.emitWarning("undecryptable_message", warning,
++			a.emitSyncWarning(ctx, "undecryptable_message", warning,
+ 				map[string]any{
+ 					"chat_jid":         v.Info.Chat.String(),
+ 					"sender_jid":       v.Info.Sender.String(),
+@@ -196,9 +211,12 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 				"app_data_changes": v.AppDataChanges,
+ 			}, "\nReplaying offline backlog: %d message(s), %d event(s) total.\n", v.Messages, v.Total)
+ 		case *events.OfflineSyncCompleted:
+-			if ctx.Err() == nil && limits.canRecordFreshness() && a.wa.IsConnected() && a.wa.IsAuthed() {
++			a.syncCompletionMu.Lock()
++			completion := a.syncCompletion
++			a.syncCompletionMu.Unlock()
++			if completion == nil && ctx.Err() == nil && limits.canRecordFreshness() && a.wa.IsConnected() && a.wa.IsAuthed() {
+ 				if err := a.db.RecordSuccessfulSync(nowUTC()); err != nil {
+-					a.emitWarning("sync_state_write_failed", fmt.Sprintf("record successful sync: %v", err), nil)
++					a.emitWarning("sync_state_write_failed", "could not save sync timestamp", nil)
+ 				}
+ 			}
+ 			a.emitOrPrint("offline_sync_completed", map[string]any{
+@@ -208,7 +226,16 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 			// Group changes made while disconnected may not all come back as
+ 			// events: ask for every group's info afresh.
+ 			a.forgetAllGroupInfo()
+-			a.emitOrPrint("connected", nil, "\nConnected.\n")
++			var connectionData map[string]any
++			a.syncCompletionMu.Lock()
++			completion := a.syncCompletion
++			a.syncCompletionMu.Unlock()
++			if completion != nil {
++				connectionData = completion.connectionEvent(v.DeliveryConnectionID, true)
++			}
++			if completion == nil {
++				a.emitOrPrint("connected", connectionData, "\nConnected.\n")
++			}
+ 			ps.mu.Lock()
+ 			if !ps.cleanupStarted && opts.PresenceMode.SendsAvailablePresence() {
+ 				a.sendPresenceBounded(types.PresenceAvailable)
+@@ -226,7 +253,16 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+ 			}
+ 			ps.mu.Unlock()
+ 		case *events.Disconnected:
+-			a.emitOrPrint("disconnected", nil, "\nDisconnected.\n")
++			var connectionData map[string]any
++			a.syncCompletionMu.Lock()
++			completion := a.syncCompletion
++			a.syncCompletionMu.Unlock()
++			if completion != nil {
++				connectionData = completion.connectionEvent(v.DeliveryConnectionID, false)
++			}
++			if completion == nil {
++				a.emitOrPrint("disconnected", connectionData, "\nDisconnected.\n")
++			}
+ 			select {
+ 			case disconnected <- struct{}{}:
+ 			default:
+@@ -319,7 +355,7 @@ func (a *App) handleAppStatePersistenceEvent(ctx context.Context, evt any, onPer
+ 	ticket := a.appStatePersist.reserveLive()
+ 	markers, markerErr := a.markLiveAppStateRecovery(evt)
+ 	if markerErr != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"app_state_recovery_marker_failed",
+ 			fmt.Sprintf("warning: failed to mark live app state recovery: %v", markerErr),
+ 			map[string]any{"error": markerErr.Error()},
+@@ -328,7 +364,7 @@ func (a *App) handleAppStatePersistenceEvent(ctx context.Context, evt any, onPer
+ 		firstErr := a.persistAppStateEvent(persistCtx, evt, nil)
+ 		retryMarkers, retryErr := a.markLiveAppStateRecovery(evt)
+ 		if retryErr != nil {
+-			a.emitWarning(
++			a.emitSyncWarning(ctx,
+ 				"app_state_recovery_marker_failed",
+ 				fmt.Sprintf("warning: failed to restore live app state recovery before ordered replay: %v", retryErr),
+ 				map[string]any{"error": retryErr.Error()},
+@@ -341,7 +377,7 @@ func (a *App) handleAppStatePersistenceEvent(ctx context.Context, evt any, onPer
+ 				a.clearLiveAppStateRecovery(retryMarkers)
+ 			} else if retryErr != nil {
+ 				if _, finalMarkerErr := a.markLiveAppStateRecovery(evt); finalMarkerErr != nil {
+-					a.emitWarning(
++					a.emitSyncWarning(ctx,
+ 						"app_state_recovery_marker_failed",
+ 						fmt.Sprintf("warning: failed to restore live app state recovery after ordered replay failure: %v", finalMarkerErr),
+ 						map[string]any{"error": finalMarkerErr.Error()},
+@@ -472,7 +508,7 @@ func (a *App) handleReceiptEvent(ctx context.Context, evt *events.Receipt) {
+ 		err = a.clearChatUnreadFromEvent(chatJID, through, ids)
+ 	}
+ 	if err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"receipt_read_self_store_failed",
+ 			fmt.Sprintf("warning: failed to clear unread count from read-self receipt for chat %s: %v", chat, err),
+ 			map[string]any{"chat_jid": chat.String(), "error": err.Error()},
+@@ -487,7 +523,7 @@ func (a *App) handleDeleteForMeEvent(ctx context.Context, evt *events.DeleteForM
+ 	chat := a.canonicalStoreJID(ctx, evt.ChatJID)
+ 	chatJID := canonicalJIDString(chat)
+ 	if err := a.db.UpsertChat(chatJID, chatKind(chat), a.wa.ResolveChatName(ctx, chat, ""), evt.Timestamp); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"delete_for_me_chat_store_failed",
+ 			fmt.Sprintf("warning: failed to store chat for delete-for-me message %s: %v", evt.MessageID, err),
+ 			map[string]any{"message_id": evt.MessageID, "error": err.Error()},
+@@ -505,7 +541,7 @@ func (a *App) handleDeleteForMeEvent(ctx context.Context, evt *events.DeleteForM
+ 		}
+ 	}
+ 	if err := a.db.MarkMessageDeletedForMe(chatJID, evt.MessageID, senderJID, evt.IsFromMe, evt.Timestamp); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"delete_for_me_store_failed",
+ 			fmt.Sprintf("warning: failed to store delete-for-me state for message %s: %v", evt.MessageID, err),
+ 			map[string]any{"message_id": evt.MessageID, "error": err.Error()},
+@@ -530,7 +566,7 @@ func (a *App) handleLiveCallEvent(ctx context.Context, evt any) error {
+ 	call, ok := wa.ParseLiveCallEvent(evt, self, alternateSelf...)
+ 	if ok {
+ 		if err := a.storeParsedCallEvent(ctx, call, "", ""); err != nil {
+-			a.emitWarning(
++			a.emitSyncWarning(ctx,
+ 				"call_event_store_failed",
+ 				fmt.Sprintf("warning: failed to store call event %s: %v", call.EventType, err),
+ 				map[string]any{"event_type": call.EventType, "call_id": call.CallID, "error": err.Error()},
+@@ -545,7 +581,7 @@ func (a *App) handleLiveCallEvent(ctx context.Context, evt any) error {
+ 		return nil
+ 	}
+ 	if err := a.deleteParsedCallEvents(ctx, deleted); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"call_event_delete_failed",
+ 			fmt.Sprintf("warning: failed to delete call log events: %v", err),
+ 			map[string]any{"chat_jid": deleted.Chat.String(), "direction": deleted.Direction, "error": err.Error()},
+@@ -580,6 +616,9 @@ func (a *App) linkedLiveCallIdentity() types.JID {
  }
  
  func (a *App) handleStarEvent(ctx context.Context, evt *events.Star) error {
@@ -1248,7 +2511,36 @@ index 68a076b..cbe8c03 100644
  	if evt == nil || evt.ChatJID.IsEmpty() || strings.TrimSpace(evt.MessageID) == "" || evt.Action == nil {
  		return nil
  	}
-@@ -668,7 +671,7 @@ func (a *App) handleLiveSyncMessage(ctx context.Context, opts SyncOptions, v *ev
+@@ -595,7 +634,7 @@ func (a *App) handleStarEvent(ctx context.Context, evt *events.Star) error {
+ 		Starred:   evt.Action.GetStarred(),
+ 		StarredAt: evt.Timestamp,
+ 	}); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"starred_store_failed",
+ 			fmt.Sprintf("warning: failed to store starred state for message %s: %v", evt.MessageID, err),
+ 			map[string]any{"message_id": evt.MessageID, "error": err.Error()},
+@@ -635,8 +674,10 @@ func (a *App) handleLiveSyncMessage(ctx context.Context, opts SyncOptions, v *ev
+ 		if ticket, queued := a.appStatePersist.reserveAfterPending(); queued {
+ 			// Store content synchronously; only reconcile its boundary again
+ 			// after older fetches have exposed their archive timestamps.
++			finishWrite := syncWorkFrom(ctx).hold()
+ 			defer func() {
+ 				a.appStatePersist.completeOne(ticket, func() {
++					defer finishWrite(nil)
+ 					if !stored {
+ 						return
+ 					}
+@@ -647,7 +688,7 @@ func (a *App) handleLiveSyncMessage(ctx context.Context, opts SyncOptions, v *ev
+ 								limit.persistenceFailed.Store(true)
+ 							}
+ 						}
+-						a.emitWarning("archive_incoming_reconcile_failed", fmt.Sprintf("warning: failed to reconcile incoming archive state: %v", err), nil)
++						a.emitSyncWarning(ctx, "archive_incoming_reconcile_failed", fmt.Sprintf("warning: failed to reconcile incoming archive state: %v", err), nil)
+ 					}
+ 				})
+ 			}()
+@@ -668,7 +709,7 @@ func (a *App) handleLiveSyncMessage(ctx context.Context, opts SyncOptions, v *ev
  		}
  		a.handlePollSideEffects(sideEffectCtx, pm, v)
  	}
@@ -1257,7 +2549,25 @@ index 68a076b..cbe8c03 100644
  		enqueueMedia(canonicalJIDString(a.canonicalStoreJID(ctx, pm.Chat)), pm.ID)
  	}
  }
-@@ -757,6 +760,36 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+@@ -676,7 +717,7 @@ func (a *App) handleLiveSyncMessage(ctx context.Context, opts SyncOptions, v *ev
+ func (a *App) downloadAndHandleHistorySync(ctx context.Context, opts SyncOptions, notif *waE2E.HistorySyncNotification, messagesStored, lastEvent *atomic.Int64, enqueueMedia func(string, string), limits ...*syncStorageLimits) {
+ 	data, err := a.wa.DownloadHistorySync(ctx, notif)
+ 	if err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"history_download_failed",
+ 			fmt.Sprintf("warning: failed to download history sync: %v", err),
+ 			map[string]any{"error": err.Error()},
+@@ -685,7 +726,7 @@ func (a *App) downloadAndHandleHistorySync(ctx context.Context, opts SyncOptions
+ 	}
+ 	a.handleHistorySync(ctx, opts, &events.HistorySync{Data: data}, messagesStored, lastEvent, enqueueMedia, limits...)
+ 	if err := a.wa.DeleteHistorySyncMedia(ctx, notif); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"history_delete_failed",
+ 			fmt.Sprintf("warning: failed to delete history sync media: %v", err),
+ 			map[string]any{"error": err.Error()},
+@@ -757,6 +798,36 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
  		if chatID == "" {
  			continue
  		}
@@ -1288,33 +2598,138 @@ index 68a076b..cbe8c03 100644
 +						limit.persistenceFailed.Store(true)
 +					}
 +				}
-+				a.emitWarning("history_catalog_store_failed", "failed to retain history chat catalog", nil)
++				a.emitSyncWarning(ctx, "history_catalog_store_failed", "failed to retain history chat catalog", nil)
 +			}
 +		}
  		a.storeHistoryUnreadCount(ctx, chatID, conv)
  		var pendingPolls []historyPollSideEffect
  		for _, m := range conv.Messages {
-@@ -804,7 +837,9 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+@@ -772,7 +843,7 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+ 			if isSecretEdit(unwrapped.Message) {
+ 				evt, err := a.wa.ParseWebMessage(pm.Chat, m.Message)
+ 				if err != nil {
+-					a.emitWarning(
++					a.emitSyncWarning(ctx,
+ 						"encrypted_edit_parse_failed",
+ 						fmt.Sprintf("warning: failed to parse encrypted edit %s: %v", pm.ID, err),
+ 						map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -786,14 +857,14 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+ 				pm = wa.ParseLiveMessage(evt)
  			}
+ 			var pollEvt *events.Message
+-			if normalized, evt, ok := a.normalizeHistoryPollMessage(pm, m.Message); ok {
++			if normalized, evt, ok := a.normalizeHistoryPollMessage(ctx, pm, m.Message); ok {
+ 				pm = normalized
+ 				pollEvt = evt
+ 			}
+ 			if pm.ReactionToID != "" && pm.ReactionEmoji == "" && m.Message.GetMessage().GetEncReactionMessage() != nil {
+ 				evt, err := a.wa.ParseWebMessage(pm.Chat, m.Message)
+ 				if err != nil {
+-					a.emitWarning(
++					a.emitSyncWarning(ctx,
+ 						"encrypted_reaction_parse_failed",
+ 						fmt.Sprintf("warning: failed to parse encrypted reaction message %s: %v", pm.ID, err),
+ 						map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -802,19 +873,26 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+ 					a.decryptEncryptedReaction(ctx, &pm, evt)
+ 				}
+ 			}
++			messageCtx, messageWork := a.beginParsedSyncWork(ctx, pm)
  			storedPM := pm
  			storedPM.UnhandledPayload = ""
+-			if err := a.storeParsedMessageForSync(ctx, storedPM, messageStoreOptions{}, limits...); err == nil {
 +			stored := false
- 			if err := a.storeParsedMessageForSync(ctx, storedPM, messageStoreOptions{}, limits...); err == nil {
++			if err := a.storeParsedMessageForSync(messageCtx, storedPM, messageStoreOptions{}, limits...); err == nil {
 +				stored = true
  				unhandledWarnings.observe(a, pm)
  				a.emitSyncProgress(messagesStored.Add(1))
  				if pm.Poll != nil || pm.PollAdd != nil || pm.PollVote != nil {
-@@ -814,7 +849,7 @@ func (a *App) handleHistorySync(ctx context.Context, opts SyncOptions, v *events
+-					pendingPolls = append(pendingPolls, historyPollSideEffect{pm: pm, evt: pollEvt, hist: m.Message})
++					pendingPolls = append(pendingPolls, historyPollSideEffect{pm: pm, evt: pollEvt, hist: m.Message, ctx: messageCtx, work: messageWork})
+ 				}
+ 			} else if ctx.Err() != nil {
++				messageWork.finish(ctx.Err())
  				a.handleHistoryPollSideEffectsBatch(context.WithoutCancel(ctx), pendingPolls)
  				return
  			}
 -			if opts.DownloadMedia && pm.Media != nil && pm.ID != "" {
++			if !stored || (pm.Poll == nil && pm.PollAdd == nil && pm.PollVote == nil) {
++				messageWork.finish(nil)
++			}
 +			if stored && opts.DownloadMedia && pm.Media != nil && pm.ID != "" {
  				enqueueMedia(canonicalJIDString(a.canonicalStoreJID(ctx, pm.Chat)), pm.ID)
  			}
  		}
+@@ -847,7 +925,7 @@ func (a *App) storeHistoryCallLogRecords(ctx context.Context, v *events.HistoryS
+ 			continue
+ 		}
+ 		if err := a.storeParsedCallEvent(ctx, call, "", ""); err != nil {
+-			a.emitWarning(
++			a.emitSyncWarning(ctx,
+ 				"history_call_log_store_failed",
+ 				fmt.Sprintf("warning: failed to store history call log %s: %v", call.CallID, err),
+ 				map[string]any{"call_id": call.CallID, "error": err.Error()},
+@@ -859,7 +937,7 @@ func (a *App) storeHistoryCallLogRecords(ctx context.Context, v *events.HistoryS
+ func (a *App) incrementLiveUnread(ctx context.Context, pm wa.ParsedMessage) {
+ 	chat := a.canonicalStoreJID(ctx, pm.Chat)
+ 	if err := a.db.IncrementChatUnread(canonicalJIDString(chat)); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"live_unread_store_failed",
+ 			fmt.Sprintf("warning: failed to increment unread count for chat %s: %v", chat, err),
+ 			map[string]any{"chat_jid": chat.String(), "error": err.Error()},
+@@ -912,7 +990,7 @@ func (a *App) storeHistoryUnreadCount(ctx context.Context, chatID string, conv *
+ 		storeErr = a.db.SetChatUnreadCount(canonicalJIDString(chat), 0)
+ 	}
+ 	if storeErr != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"history_unread_store_failed",
+ 			fmt.Sprintf("warning: failed to store unread count for chat %s: %v", chat, storeErr),
+ 			map[string]any{"chat_jid": chat.String(), "unread_count": count, "error": storeErr.Error()},
+@@ -927,17 +1005,28 @@ func (a *App) emitSyncProgress(total int64) {
+ 	a.emitOrPrint("progress", map[string]any{"messages_synced": total}, "\rSynced %d messages...", total)
+ }
+ 
+-func (a *App) storeParsedMessageForSync(ctx context.Context, pm wa.ParsedMessage, options messageStoreOptions, limits ...*syncStorageLimits) error {
++func (a *App) storeParsedMessageForSync(ctx context.Context, pm wa.ParsedMessage, options messageStoreOptions, limits ...*syncStorageLimits) (err error) {
++	var work *syncWork
++	ctx, work = a.beginParsedSyncWork(ctx, pm)
++	defer func() {
++		if !errors.Is(err, errContentSkipped) {
++			work.finish(err)
++		} else {
++			work.finish(nil)
++		}
++	}()
+ 	if len(limits) > 0 && limits[0] != nil {
+ 		return limits[0].StoreParsedMessage(ctx, pm, options)
+ 	}
+-	return a.storeParsedMessage(ctx, pm, options)
++	err = a.storeParsedMessage(ctx, pm, options)
++	recordSyncFailure(ctx, err)
++	return err
+ }
+ 
+ func (a *App) decryptEncryptedReaction(ctx context.Context, pm *wa.ParsedMessage, msg *events.Message) {
+ 	reaction, err := a.wa.DecryptReaction(ctx, msg)
+ 	if err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"encrypted_reaction_decrypt_failed",
+ 			fmt.Sprintf("warning: failed to decrypt reaction message %s: %v", pm.ID, err),
+ 			map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -987,7 +1076,7 @@ func (a *App) sendPresence(ctx context.Context, presence types.Presence) {
+ 		return
+ 	}
+ 	if err := a.wa.SendPresence(ctx, presence); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"send_presence_failed",
+ 			fmt.Sprintf("warning: failed to send %s presence: %v", presence, err),
+ 			map[string]any{"presence": string(presence), "error": err.Error()},
 diff --git a/internal/app/sync_limits.go b/internal/app/sync_limits.go
-index d4aaf59..7706df8 100644
+index d4aaf59..228e16f 100644
 --- a/internal/app/sync_limits.go
 +++ b/internal/app/sync_limits.go
 @@ -2,6 +2,7 @@ package app
@@ -1325,31 +2740,142 @@ index d4aaf59..7706df8 100644
  	"sync"
  	"sync/atomic"
  
-@@ -27,7 +28,7 @@ func (l *syncStorageLimits) canRecordFreshness() bool {
+@@ -27,8 +28,9 @@ func (l *syncStorageLimits) canRecordFreshness() bool {
  func (l *syncStorageLimits) StoreParsedMessage(ctx context.Context, pm wa.ParsedMessage, options messageStoreOptions) error {
  	if l.opts.MaxMessages <= 0 && l.opts.MaxDBSizeBytes <= 0 {
  		err := l.app.storeParsedMessage(ctx, pm, options)
 -		if err != nil {
 +		if err != nil && !errors.Is(err, errContentSkipped) {
  			l.persistenceFailed.Store(true)
++			recordSyncFailure(ctx, err)
  		}
  		return err
-@@ -37,7 +38,9 @@ func (l *syncStorageLimits) StoreParsedMessage(ctx context.Context, pm wa.Parsed
+ 	}
+@@ -37,7 +39,10 @@ func (l *syncStorageLimits) StoreParsedMessage(ctx context.Context, pm wa.Parsed
  		return err
  	}
  	if err := l.app.storeParsedMessage(ctx, pm, options); err != nil {
 -		l.persistenceFailed.Store(true)
 +		if !errors.Is(err, errContentSkipped) {
 +			l.persistenceFailed.Store(true)
++			recordSyncFailure(ctx, err)
 +		}
  		return err
  	}
  	if err := l.app.checkSyncStorageLimits(l.opts); err != nil {
 diff --git a/internal/app/sync_polls.go b/internal/app/sync_polls.go
-index 638bc7c..fa7952c 100644
+index 638bc7c..a633673 100644
 --- a/internal/app/sync_polls.go
 +++ b/internal/app/sync_polls.go
-@@ -186,6 +186,9 @@ func (a *App) handlePollAddOption(ctx context.Context, pm wa.ParsedMessage, evt
+@@ -37,7 +37,7 @@ func (a *App) handlePollSideEffects(ctx context.Context, pm wa.ParsedMessage, ev
+ // input, which we reconstruct via ParseWebMessage.
+ func (a *App) handleHistoryPollSideEffects(ctx context.Context, pm wa.ParsedMessage, evt *events.Message, hist *waProto.WebMessageInfo) {
+ 	if evt == nil {
+-		if normalized, parsed, ok := a.normalizeHistoryPollMessage(pm, hist); ok {
++		if normalized, parsed, ok := a.normalizeHistoryPollMessage(ctx, pm, hist); ok {
+ 			pm = normalized
+ 			evt = parsed
+ 		}
+@@ -49,7 +49,7 @@ func (a *App) handleHistoryPollSideEffects(ctx context.Context, pm wa.ParsedMess
+ 		if evt == nil && hist != nil {
+ 			parsed, err := a.wa.ParseWebMessage(pm.Chat, hist)
+ 			if err != nil {
+-				a.emitWarning(
++				a.emitSyncWarning(ctx,
+ 					"poll_add_parse_failed",
+ 					fmt.Sprintf("warning: failed to parse history poll option %s: %v", pm.ID, err),
+ 					map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -66,7 +66,7 @@ func (a *App) handleHistoryPollSideEffects(ctx context.Context, pm wa.ParsedMess
+ 		if evt == nil && hist != nil {
+ 			parsed, err := a.wa.ParseWebMessage(pm.Chat, hist)
+ 			if err != nil {
+-				a.emitWarning(
++				a.emitSyncWarning(ctx,
+ 					"poll_vote_parse_failed",
+ 					fmt.Sprintf("warning: failed to parse history poll vote %s: %v", pm.ID, err),
+ 					map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -76,7 +76,7 @@ func (a *App) handleHistoryPollSideEffects(ctx context.Context, pm wa.ParsedMess
+ 			evt = parsed
+ 		}
+ 		if evt == nil {
+-			a.emitWarning(
++			a.emitSyncWarning(ctx,
+ 				"poll_vote_parse_failed",
+ 				fmt.Sprintf("warning: failed to parse history poll vote %s: missing history message", pm.ID),
+ 				map[string]any{"message_id": pm.ID, "error": "missing history message"},
+@@ -88,36 +88,49 @@ func (a *App) handleHistoryPollSideEffects(ctx context.Context, pm wa.ParsedMess
+ }
+ 
+ type historyPollSideEffect struct {
++	ctx  context.Context
++	work *syncWork
+ 	pm   wa.ParsedMessage
+ 	evt  *events.Message
+ 	hist *waProto.WebMessageInfo
+ }
+ 
+ func (a *App) handleHistoryPollSideEffectsBatch(ctx context.Context, pending []historyPollSideEffect) {
++	defer func() {
++		for _, item := range pending {
++			item.work.finish(nil)
++		}
++	}()
++	itemContext := func(item historyPollSideEffect) context.Context {
++		if item.ctx != nil {
++			return context.WithoutCancel(item.ctx)
++		}
++		return ctx
++	}
+ 	for _, item := range pending {
+ 		if item.pm.Poll != nil {
+-			a.handleHistoryPollSideEffects(ctx, item.pm, item.evt, item.hist)
++			a.handleHistoryPollSideEffects(itemContext(item), item.pm, item.evt, item.hist)
+ 		}
+ 	}
+ 	for _, item := range pending {
+ 		if item.pm.Poll == nil && item.pm.PollAdd != nil {
+-			a.handleHistoryPollSideEffects(ctx, item.pm, item.evt, item.hist)
++			a.handleHistoryPollSideEffects(itemContext(item), item.pm, item.evt, item.hist)
+ 		}
+ 	}
+ 	for _, item := range pending {
+ 		if item.pm.Poll == nil && item.pm.PollAdd == nil && item.pm.PollVote != nil {
+-			a.handleHistoryPollSideEffects(ctx, item.pm, item.evt, item.hist)
++			a.handleHistoryPollSideEffects(itemContext(item), item.pm, item.evt, item.hist)
+ 		}
+ 	}
+ }
+ 
+-func (a *App) normalizeHistoryPollMessage(pm wa.ParsedMessage, hist *waProto.WebMessageInfo) (wa.ParsedMessage, *events.Message, bool) {
++func (a *App) normalizeHistoryPollMessage(ctx context.Context, pm wa.ParsedMessage, hist *waProto.WebMessageInfo) (wa.ParsedMessage, *events.Message, bool) {
+ 	if hist == nil || !historyPollNeedsEventParse(pm, hist) {
+ 		return pm, nil, false
+ 	}
+ 	parsed, err := a.wa.ParseWebMessage(pm.Chat, hist)
+ 	if err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"poll_history_parse_failed",
+ 			fmt.Sprintf("warning: failed to parse history poll message %s: %v", pm.ID, err),
+ 			map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -161,7 +174,7 @@ func (a *App) handlePollAddOption(ctx context.Context, pm wa.ParsedMessage, evt
+ 	if strings.TrimSpace(add.Option) == "" && evt != nil && evt.Message.GetSecretEncryptedMessage() != nil {
+ 		decrypted, err := a.wa.DecryptSecretEncryptedMessage(ctx, evt)
+ 		if err != nil {
+-			a.emitWarning(
++			a.emitSyncWarning(ctx,
+ 				"poll_add_decrypt_failed",
+ 				fmt.Sprintf("warning: failed to decrypt poll option %s: %v", pm.ID, err),
+ 				map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -179,19 +192,22 @@ func (a *App) handlePollAddOption(ctx context.Context, pm wa.ParsedMessage, evt
+ 	}
+ 	chatJID, pollMsgID, err := resolvePollAddKey(pm, add)
+ 	if err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"poll_add_unknown_key",
+ 			fmt.Sprintf("warning: poll option %s has invalid key: %v", pm.ID, err),
+ 			map[string]any{"message_id": pm.ID, "error": err.Error()},
  		)
  		return
  	}
@@ -1359,7 +2885,14 @@ index 638bc7c..fa7952c 100644
  	poll, err := a.db.GetPoll(chatJID, pollMsgID)
  	if err != nil {
  		if alt, altErr := a.db.FindPollByMsgID(pollMsgID); altErr == nil {
-@@ -199,6 +202,9 @@ func (a *App) handlePollAddOption(ctx context.Context, pm wa.ParsedMessage, evt
+ 			poll = alt
+ 		} else {
+-			a.emitWarning(
++			a.emitSyncWarning(ctx,
+ 				"poll_add_unknown_poll",
+ 				fmt.Sprintf("warning: poll option %s references unknown poll %s/%s: %v", pm.ID, chatJID, pollMsgID, err),
+ 				map[string]any{"message_id": pm.ID, "poll_chat_jid": chatJID, "poll_msg_id": pollMsgID, "error": err.Error()},
+@@ -199,12 +215,15 @@ func (a *App) handlePollAddOption(ctx context.Context, pm wa.ParsedMessage, evt
  			return
  		}
  	}
@@ -1369,7 +2902,32 @@ index 638bc7c..fa7952c 100644
  	if slices.Contains(poll.Options, option) {
  		return
  	}
-@@ -261,6 +267,9 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
+ 	poll.Options = append(poll.Options, option)
+ 	if err := a.db.UpsertPoll(poll); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"poll_add_store_failed",
+ 			fmt.Sprintf("warning: failed to store poll option %s: %v", pm.ID, err),
+ 			map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -239,7 +258,7 @@ func (a *App) upsertPollFromParsed(ctx context.Context, pm wa.ParsedMessage) {
+ 		SelectableCount: pm.Poll.SelectableCount,
+ 		CreatedAt:       pm.Timestamp,
+ 	}); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"poll_upsert_failed",
+ 			fmt.Sprintf("warning: failed to store poll %s: %v", pm.ID, err),
+ 			map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -253,7 +272,7 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
+ 	}
+ 	chatJID, pollMsgID, err := resolvePollKey(pm)
+ 	if err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"poll_vote_unknown_key",
+ 			fmt.Sprintf("warning: poll vote %s has invalid key: %v", pm.ID, err),
+ 			map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -261,6 +280,9 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
  		return
  	}
  
@@ -1379,7 +2937,16 @@ index 638bc7c..fa7952c 100644
  	poll, err := a.db.GetPoll(chatJID, pollMsgID)
  	if err != nil {
  		// Fall back to msg-id-only lookup. WhatsApp re-keys self-poll
-@@ -285,6 +294,9 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
+@@ -271,7 +293,7 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
+ 			poll = alt
+ 			chatJID = alt.ChatJID
+ 		} else {
+-			a.emitWarning(
++			a.emitSyncWarning(ctx,
+ 				"poll_vote_unknown_poll",
+ 				fmt.Sprintf("warning: poll vote %s references unknown poll %s/%s: %v", pm.ID, chatJID, pollMsgID, err),
+ 				map[string]any{
+@@ -285,9 +307,12 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
  		}
  	}
  
@@ -1388,4 +2955,473 @@ index 638bc7c..fa7952c 100644
 +	}
  	decrypted, err := a.wa.DecryptPollVote(ctx, evt)
  	if err != nil {
- 		a.emitWarning(
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"poll_vote_decrypt_failed",
+ 			fmt.Sprintf("warning: failed to decrypt poll vote %s: %v", pm.ID, err),
+ 			map[string]any{"message_id": pm.ID, "error": err.Error()},
+@@ -306,7 +331,7 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
+ 		voterJID = canonicalJIDString(a.wa.ResolveLIDToPN(ctx, parsed))
+ 	}
+ 	if voterJID == "" {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"poll_vote_no_voter",
+ 			fmt.Sprintf("warning: poll vote %s has no voter JID", pm.ID),
+ 			map[string]any{"message_id": pm.ID},
+@@ -325,7 +350,7 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage, evt *even
+ 		UnknownHashes: selected.UnknownHashes,
+ 		VotedAt:       votedAt,
+ 	}); err != nil {
+-		a.emitWarning(
++		a.emitSyncWarning(ctx,
+ 			"poll_vote_store_failed",
+ 			fmt.Sprintf("warning: failed to store poll vote %s: %v", pm.ID, err),
+ 			map[string]any{"message_id": pm.ID, "error": err.Error()},
+diff --git a/internal/app/sync_recovery.go b/internal/app/sync_recovery.go
+index de2577c..705717d 100644
+--- a/internal/app/sync_recovery.go
++++ b/internal/app/sync_recovery.go
+@@ -25,6 +25,9 @@ func (a *App) handleAppStateSyncError(ctx context.Context, evt *events.AppStateS
+ 	if errors.Is(evt.Error, wa.ErrEmptyAppStateKeyShare) {
+ 		code, reason = "app_state_key_unavailable", "requires a key shared without data"
+ 	} else if !errors.Is(evt.Error, appstate.ErrMismatchingLTHash) {
++		ctx, work := a.beginAppStateSyncWork(ctx, string(evt.Name))
++		recordSyncFailure(ctx, evt.Error)
++		finishAppStateSyncWork(work, evt.Error)
+ 		return
+ 	}
+ 	if a.ownsManualAppStateFetch(evt.Name) {
+@@ -46,7 +49,11 @@ func (a *App) handleAppStateSyncError(ctx context.Context, evt *events.AppStateS
+ 		return
+ 	}
+ 
++	ctx, work := a.beginAppStateSyncWork(ctx, name)
++	finishRecovery := syncWorkFrom(ctx).hold()
++	finishAppStateSyncWork(work, nil)
+ 	a.appStateRecoveryWorkers.Go(func() {
++		defer finishRecovery(nil)
+ 		a.emitWarning(code,
+ 			fmt.Sprintf("warning: app state %s %s; attempting full sync", name, reason),
+ 			map[string]any{"name": name})
+@@ -54,8 +61,11 @@ func (a *App) handleAppStateSyncError(ctx context.Context, evt *events.AppStateS
+ 	})
+ }
+ 
+-func (a *App) recoverAppStateCollection(ctx context.Context, name string, recoveries *sync.Map, timeout time.Duration) {
++func (a *App) recoverAppStateCollection(ctx context.Context, name string, recoveries *sync.Map, timeout time.Duration) (resultErr error) {
++	ctx, work := a.beginAppStateSyncWork(ctx, name)
+ 	defer func() {
++		recordSyncFailure(ctx, resultErr)
++		finishAppStateSyncWork(work, resultErr)
+ 		if ctx.Err() != nil {
+ 			recoveries.Delete(name)
+ 		}
+@@ -65,14 +75,13 @@ func (a *App) recoverAppStateCollection(ctx context.Context, name string, recove
+ 	cancelLock()
+ 	if err != nil {
+ 		a.warnAppStateRecovery(name, err)
+-		return
++		return err
+ 	}
+ 	defer release()
+-
+ 	generation, _, err := a.db.BeginAppStateRecovery(name)
+ 	if err != nil {
+ 		a.warnAppStateRecovery(name, err)
+-		return
++		return err
+ 	}
+ 	collection := appstate.WAPatchName(name)
+ 	tracker := &appStatePersistenceTracker{}
+@@ -80,26 +89,22 @@ func (a *App) recoverAppStateCollection(ctx context.Context, name string, recove
+ 	fetchErr, persistenceErr := a.fetchAndPersistAppState(fetchCtx, collection, true, tracker)
+ 	cancelFetch()
+ 	if persistenceErr != nil {
+-		a.warnAppStateRecovery(name, fmt.Errorf("persist full app state replay: %w", persistenceErr))
+-		return
++		err = fmt.Errorf("persist full app state replay: %w", persistenceErr)
++		a.warnAppStateRecovery(name, err)
++		return err
+ 	}
+ 	if fetchErr == nil {
+-		if err := a.clearCompletedAppStateRecovery(collection, generation); err != nil {
++		if err = a.clearCompletedAppStateRecovery(collection, generation); err != nil {
+ 			a.warnAppStateRecovery(name, err)
+-			return
++			return err
+ 		}
+-		a.emitOrPrint("app_state_full_sync_completed", map[string]any{"name": name},
+-			"\rApp state %s resolved via full sync\n", name)
+-		return
++		a.emitOrPrint("app_state_full_sync_completed", map[string]any{"name": name}, "\rApp state %s resolved via full sync\n", name)
++		return nil
+ 	}
+ 	if ctx.Err() != nil {
+-		return
++		return ctx.Err()
+ 	}
+-	a.emitWarning("app_state_full_sync_failed",
+-		fmt.Sprintf("warning: app state %s full sync failed: %v; requesting recovery snapshot", name, fetchErr),
+-		map[string]any{"name": name, "error": fetchErr.Error()})
+-
+-	// A full-fetch timeout must not consume the primary recovery budget.
++	a.emitWarning("app_state_full_sync_failed", fmt.Sprintf("warning: app state %s full sync failed: %v; requesting recovery snapshot", name, fetchErr), map[string]any{"name": name, "error": fetchErr.Error()})
+ 	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, timeout)
+ 	defer cancelRecovery()
+ 	err = a.recoverMismatchingAppState(recoveryCtx, collection, generation, tracker, func(id types.MessageID) {
+@@ -112,6 +117,30 @@ func (a *App) recoverAppStateCollection(ctx context.Context, name string, recove
+ 	if err != nil {
+ 		a.warnAppStateRecovery(name, err)
+ 	}
++	return err
++}
++
++// Collection identities let a successful replay recover exactly the failed
++// app-state work, including after a process restart. The startup task remains
++// independent, so a later verified collection snapshot can settle its debt.
++func (a *App) beginAppStateSyncWork(ctx context.Context, name string) (context.Context, *syncWork) {
++	key := "app-state-recovery:" + name
++	if current := syncWorkFrom(ctx); current != nil && current.key == key {
++		return ctx, nil
++	}
++	a.syncCompletionMu.Lock()
++	tracker := a.syncCompletion
++	a.syncCompletionMu.Unlock()
++	if tracker == nil {
++		return ctx, nil
++	}
++	return tracker.begin(ctx, key, "")
++}
++func finishAppStateSyncWork(work *syncWork, err error) {
++	if errors.Is(err, errContentSkipped) {
++		err = nil
++	}
++	work.finish(err)
+ }
+ 
+ func (a *App) warnAppStateRecovery(name string, err error) {
+@@ -121,21 +150,27 @@ func (a *App) warnAppStateRecovery(name string, err error) {
+ }
+ 
+ func (a *App) syncAppStateDeltas(ctx context.Context, recoveries *sync.Map) {
++	_, inspectionWork := a.beginAppStateSyncWork(ctx, "startup-inspection")
++	var inspectionErr error
++	defer func() { finishAppStateSyncWork(inspectionWork, inspectionErr) }()
+ 	// Older builds consumed this preference without saving it. Incremental
+ 	// deltas cannot recover it, so request the existing full-replay path.
+ 	archiveRecovery, err := a.db.ChatArchiveRecoveryRequired()
+ 	if err != nil {
++		inspectionErr = err
+ 		a.warnAppStateRecovery(string(appstate.WAPatchRegularLow), err)
+ 		return
+ 	}
+ 	if archiveRecovery {
+ 		if err := a.db.MarkAppStateRecoveryRequired(string(appstate.WAPatchRegularLow)); err != nil {
++			inspectionErr = err
+ 			a.warnAppStateRecovery(string(appstate.WAPatchRegularLow), err)
+ 			return
+ 		}
+ 	}
+ 	pending, err := a.db.AppStateRecoveryCollections()
+ 	if err != nil {
++		inspectionErr = err
+ 		a.emitWarning("app_state_sync_failed", fmt.Sprintf("warning: cannot inspect app state recovery: %v", err),
+ 			map[string]any{"error": err.Error()})
+ 		return
+@@ -146,16 +181,19 @@ func (a *App) syncAppStateDeltas(ctx context.Context, recoveries *sync.Map) {
+ 			if a.isAppStateFullSyncBroken(collection) {
+ 				// A snapshot must cover replay debt, even when the preference
+ 				// was already seen. Never destroy a known-broken collection.
++				collectionCtx, collectionWork := a.beginAppStateSyncWork(ctx, name)
+ 				generation, _, err := a.db.BeginAppStateRecovery(name)
+ 				if err != nil {
++					finishAppStateSyncWork(collectionWork, err)
+ 					a.warnAppStateRecovery(name, err)
+ 					continue
+ 				}
+-				a.requestBackgroundAppStateRecovery(ctx, collection, generation)
++				requestErr := a.requestBackgroundAppStateRecovery(collectionCtx, collection, generation)
+ 				// Keep catching up new mutations while the primary is asleep.
+ 				// This does not settle the older, still-unseen snapshot debt.
+-				fetchErr, persistenceErr := a.fetchAndPersistAppState(ctx, collection, false, &appStatePersistenceTracker{})
+-				if err := errors.Join(fetchErr, persistenceErr); err != nil {
++				fetchErr, persistenceErr := a.fetchAndPersistAppState(collectionCtx, collection, false, &appStatePersistenceTracker{})
++				finishAppStateSyncWork(collectionWork, errors.Join(requestErr, fetchErr, persistenceErr))
++				if err := errors.Join(requestErr, fetchErr, persistenceErr); err != nil {
+ 					a.warnAppStateRecovery(name, err)
+ 				}
+ 				continue
+@@ -168,14 +206,17 @@ func (a *App) syncAppStateDeltas(ctx context.Context, recoveries *sync.Map) {
+ 			continue
+ 		}
+ 		fullSync := name == appstate.WAPatchRegular
+-		if err := a.wa.FetchAppState(ctx, string(name), fullSync, false); err != nil {
+-			if errors.Is(err, wa.ErrEmptyAppStateKeyShare) {
+-				a.handleAppStateSyncError(ctx, &events.AppStateSyncError{Name: name, FullSync: fullSync, Error: err}, recoveries)
+-				continue
++		collectionCtx, collectionWork := a.beginAppStateSyncWork(ctx, string(name))
++		fetchErr := a.wa.FetchAppState(collectionCtx, string(name), fullSync, false)
++		if errors.Is(fetchErr, wa.ErrEmptyAppStateKeyShare) || errors.Is(fetchErr, appstate.ErrMismatchingLTHash) {
++			a.handleAppStateSyncError(collectionCtx, &events.AppStateSyncError{Name: name, FullSync: fullSync, Error: fetchErr}, recoveries)
++			if _, recovering := recoveries.Load(string(name)); recovering {
++				fetchErr = nil
+ 			}
+-			a.emitWarning("app_state_sync_failed",
+-				fmt.Sprintf("warning: failed to sync WhatsApp app state %s: %v", name, err),
+-				map[string]any{"name": string(name), "error": err.Error()})
++		}
++		finishAppStateSyncWork(collectionWork, fetchErr)
++		if fetchErr != nil {
++			a.emitWarning("app_state_sync_failed", fmt.Sprintf("warning: failed to sync WhatsApp app state %s: %v", name, fetchErr), map[string]any{"name": string(name), "error": fetchErr.Error()})
+ 		}
+ 	}
+ }
+diff --git a/internal/app/sync_recovery_completion_test.go b/internal/app/sync_recovery_completion_test.go
+new file mode 100644
+index 0000000..e1ce8b6
+--- /dev/null
++++ b/internal/app/sync_recovery_completion_test.go
+@@ -0,0 +1,137 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++
++	"go.mau.fi/whatsmeow/appstate"
++	"go.mau.fi/whatsmeow/types"
++	"go.mau.fi/whatsmeow/types/events"
++)
++
++func TestSyncCompletionStartupAppStateFailureRequiresSuccessfulRecovery(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	if err := a.db.SetChatArchiveSetting(false, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	f.mu.Lock()
++	f.appStateFetchErr = errors.New("synthetic app-state fetch failure")
++	f.mu.Unlock()
++	a.syncAppStateDeltas(t.Context(), &sync.Map{})
++	if state := completionState(t, tracker); state != "error" {
++		t.Fatalf("failed startup app-state fetch reported %s", state)
++	}
++	f.mu.Lock()
++	f.appStateFetchErr = nil
++	f.mu.Unlock()
++	a.syncAppStateDeltas(t.Context(), &sync.Map{})
++	if state := completionState(t, tracker); state != "caught_up" {
++		t.Fatalf("successful same-collection retry reported %s", state)
++	}
++}
++
++func TestSyncCompletionAsyncAppStateRecoveryWaitsForPersistence(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	entered, release := make(chan struct{}), make(chan struct{})
++	client := &appStateContextWA{fakeWA: f}
++	client.fetchEvents = func(context.Context, string, bool, bool) ([]any, error) { close(entered); <-release; return nil, nil }
++	a.wa = client
++	a.handleAppStateSyncError(t.Context(), &events.AppStateSyncError{Name: appstate.WAPatchRegularLow, Error: appstate.ErrMismatchingLTHash}, &sync.Map{})
++	<-entered
++	state := completionState(t, tracker)
++	close(release)
++	a.appStateRecoveryWorkers.Wait()
++	if state != "syncing" {
++		t.Fatalf("pending asynchronous recovery reported %s", state)
++	}
++	if state = completionState(t, tracker); state != "caught_up" {
++		t.Fatalf("persisted asynchronous recovery reported %s", state)
++	}
++}
++
++func TestSyncCompletionLateAppStateRecoveryRetainsErrorUntilSnapshotSaved(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	name := string(appstate.WAPatchRegularLow)
++	_, failed := tracker.begin(t.Context(), "app-state-recovery:"+name, "")
++	failed.finish(errors.New("synthetic earlier persistence failure"))
++	client := &appStateContextWA{fakeWA: f}
++	client.fetchEvents = func(context.Context, string, bool, bool) ([]any, error) { return nil, appstate.ErrMismatchingLTHash }
++	client.requestAppStateRecovery = func(context.Context, string) (types.MessageID, error) { return "synthetic-recovery", nil }
++	a.wa = client
++	if err := a.recoverAppStateCollection(t.Context(), name, &sync.Map{}, 10*time.Millisecond); err != nil {
++		t.Fatal(err)
++	}
++	if state := completionState(t, tracker); state != "error" {
++		t.Fatalf("pending retry erased unrecovered failure: %s", state)
++	}
++	f.emit(&events.AppStateSyncComplete{Name: appstate.WAPatchRegularLow, Recovery: true})
++	a.appStateRecoveryWorkers.Wait()
++	if state := completionState(t, tracker); state != "caught_up" {
++		t.Fatalf("late snapshot did not settle recovered collection: %s", state)
++	}
++}
++
++func TestSyncCompletionAppStateRecoveryFailureAndSameCollectionRetry(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	client := &appStateContextWA{fakeWA: f}
++	client.fetchEvents = func(context.Context, string, bool, bool) ([]any, error) {
++		return nil, errors.New("synthetic fetch failure")
++	}
++	client.requestAppStateRecovery = func(context.Context, string) (types.MessageID, error) {
++		return "", errors.New("synthetic phone failure")
++	}
++	a.wa = client
++	name := string(appstate.WAPatchRegularLow)
++	if err := a.recoverAppStateCollection(t.Context(), name, &sync.Map{}, time.Second); err == nil {
++		t.Fatal("expected recovery failure")
++	}
++	if state := completionState(t, tracker); state != "error" {
++		t.Fatalf("failed recovery reported %s", state)
++	}
++	client.fetchEvents = func(context.Context, string, bool, bool) ([]any, error) { return nil, nil }
++	if err := a.recoverAppStateCollection(t.Context(), name, &sync.Map{}, time.Second); err != nil {
++		t.Fatal(err)
++	}
++	if state := completionState(t, tracker); state != "caught_up" {
++		t.Fatalf("successful collection replay reported %s", state)
++	}
++}
++
++func TestSyncCompletionExpectedAppStateScopeSkipIsHarmless(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	if err := a.db.SetChatArchiveSetting(false, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	f.mu.Lock()
++	f.appStateFetchErr = errContentSkipped
++	f.mu.Unlock()
++	a.syncAppStateDeltas(t.Context(), &sync.Map{})
++	if state := completionState(t, tracker); state != "caught_up" {
++		t.Fatalf("expected scope exclusion reported %s", state)
++	}
++}
++
++func TestSyncCompletionStartupMismatchRecoveredByAsyncFullReplay(t *testing.T) {
++	a, f, tracker, _ := completionFixture(t)
++	completionReady(f)
++	if err := a.db.SetChatArchiveSetting(false, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	client := &appStateContextWA{fakeWA: f}
++	client.fetchAppState = func(context.Context, string, bool, bool) error { return appstate.ErrMismatchingLTHash }
++	client.fetchEvents = func(context.Context, string, bool, bool) ([]any, error) { return nil, nil }
++	a.wa = client
++	a.syncAppStateDeltas(t.Context(), &sync.Map{})
++	a.appStateRecoveryWorkers.Wait()
++	if state := completionState(t, tracker); state != "caught_up" {
++		t.Fatalf("successful fallback retained original fetch failure: %s", state)
++	}
++}
+diff --git a/internal/app/sync_snapshot_test.go b/internal/app/sync_snapshot_test.go
+new file mode 100644
+index 0000000..b79a0e4
+--- /dev/null
++++ b/internal/app/sync_snapshot_test.go
+@@ -0,0 +1,99 @@
++package app
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"github.com/openclaw/wacli/internal/out"
++	"go.mau.fi/whatsmeow/types"
++	"go.mau.fi/whatsmeow/types/events"
++)
++
++func TestSyncSnapshotCannotEraseANewerConnection(t *testing.T) {
++	a, _ := policyTestApp(t, "all", `[]`)
++	var output bytes.Buffer
++	a.opts.Events = out.NewEventWriter(&output, true)
++	tracker := &syncCompletion{app: a, runID: "fixture", revision: 1, connection: 1, connectionVersion: 1,
++		connected: true, boundary: true, debts: map[string]syncDebt{}, activeKeys: map[string]int{}}
++	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	go func() {
++		tracker.snapshot(func() bool { close(started); <-release; return false })
++		close(done)
++	}()
++	<-started
++	tracker.receive(&events.DeliveryState{ConnectionID: 2, Boundary: true})
++	tracker.connectionEvent(2, true)
++	close(release)
++	<-done
++	tracker.mu.Lock()
++	state, connected := tracker.stateLocked(), tracker.connected
++	tracker.mu.Unlock()
++	if state != "caught_up" || !connected {
++		t.Fatalf("old health sample erased current connection: state=%s connected=%v", state, connected)
++	}
++	if strings.Contains(output.String(), `"event":"connection_check_failed"`) {
++		t.Fatalf("stale health check was published against new connection: %s", output.String())
++	}
++}
++
++func TestSyncSnapshotFailedCheckInvalidatesWithoutRestoringFromLiveness(t *testing.T) {
++	a, _ := policyTestApp(t, "all", `[]`)
++	var output bytes.Buffer
++	a.opts.Events = out.NewEventWriter(&output, true)
++	tracker := &syncCompletion{app: a, runID: "fixture", revision: 3, connection: 7, connectionVersion: 1,
++		connected: true, boundary: true, debts: map[string]syncDebt{}, activeKeys: map[string]int{}}
++	tracker.snapshot(func() bool { return false })
++	tracker.snapshot(func() bool { t.Fatal("disconnected snapshot performed a connection check"); return true })
++	tracker.mu.Lock()
++	state, boundary := tracker.stateLocked(), tracker.boundary
++	tracker.mu.Unlock()
++	if state != "unknown" || boundary {
++		t.Fatalf("failed check retained completion: %s boundary=%v", state, boundary)
++	}
++	var failedCheck bool
++	for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
++		var event struct {
++			Event string `json:"event"`
++			Data  struct {
++				RunID        string `json:"run_id"`
++				Revision     int64  `json:"revision"`
++				ConnectionID uint64 `json:"connection_id"`
++				State        string `json:"state"`
++			} `json:"data"`
++		}
++		if err := json.Unmarshal([]byte(line), &event); err != nil {
++			t.Fatal(err)
++		}
++		if event.Data.State == "caught_up" {
++			t.Fatalf("liveness restored completion: %s", line)
++		}
++		if event.Event == "connection_check_failed" {
++			failedCheck = event.Data.RunID == "fixture" && event.Data.Revision == 3 && event.Data.ConnectionID == 7
++		}
++	}
++	if !failedCheck {
++		t.Fatalf("failed health check omitted its connection identity: %s", output.String())
++	}
++}
++
++func TestSyncStartupExcludesUndecryptableWorkOutsideScope(t *testing.T) {
++	a, fake := policyTestApp(t, "selected", `["111@s.whatsapp.net"]`)
++	var output bytes.Buffer
++	a.opts.Events = out.NewEventWriter(&output, true)
++	excluded := types.NewJID("222", types.DefaultUserServer)
++	fake.connectEvents = []any{&events.Connected{DeliveryConnectionID: 1},
++		&events.UndecryptableMessage{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: excluded}, ID: "excluded"}},
++		&events.DeliveryState{ConnectionID: 1, Boundary: true}}
++	ctx, cancel := context.WithCancel(t.Context())
++	defer cancel()
++	_, err := a.Sync(ctx, SyncOptions{Mode: SyncModeFollow, AfterConnect: func(context.Context) error { cancel(); return nil }})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if strings.Contains(output.String(), `"state":"error"`) || !strings.Contains(output.String(), `"state":"caught_up"`) {
++		t.Fatalf("excluded work blocked startup catch-up: %s", output.String())
++	}
++}

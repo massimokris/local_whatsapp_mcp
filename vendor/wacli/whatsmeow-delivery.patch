@@ -1,0 +1,497 @@
+diff --git a/appstate.go b/appstate.go
+index 60157c3..01c44bd 100644
+--- a/appstate.go
++++ b/appstate.go
+@@ -614,11 +614,11 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
+ 				return fmt.Errorf("%w (also, applying patches in the response failed: %w)", mainErr, err)
+ 			} else {
+ 				zerolog.Ctx(ctx).Debug().Msg("Retrying app state send after applying conflicting patches")
+-				go func() {
++				cli.goWithDelivery(ctx, func() {
+ 					for _, evt := range eventsToDispatch {
+ 						cli.dispatchEvent(evt)
+ 					}
+-				}()
++				})
+ 				return cli.sendAppState(ctx, patch, false)
+ 			}
+ 		}
+@@ -628,11 +628,11 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
+ 	if err != nil {
+ 		return fmt.Errorf("failed to fetch app state after sending update: %w", err)
+ 	}
+-	go func() {
++	cli.goWithDelivery(ctx, func() {
+ 		for _, evt := range eventsToDispatch {
+ 			cli.dispatchEvent(evt)
+ 		}
+-	}()
++	})
+ 
+ 	return nil
+ }
+diff --git a/client.go b/client.go
+index dcbad5d..59f40cc 100644
+--- a/client.go
++++ b/client.go
+@@ -62,6 +62,9 @@ type deviceCache struct {
+ 
+ // Client contains everything necessary to connect to and interact with the WhatsApp web API.
+ type Client struct {
++	deliveryConnectionID atomic.Uint64
++	deliveryTickets      sync.Map
++
+ 	Store   *store.Device
+ 	Log     waLog.Logger
+ 	recvLog waLog.Logger
+@@ -545,7 +548,7 @@ func (cli *Client) ConnectContext(ctx context.Context) error {
+ 	err := cli.unlockedConnect(ctx)
+ 	if isRetryableConnectError(err) && cli.InitialAutoReconnect && cli.EnableAutoReconnect {
+ 		cli.Log.Errorf("Initial connection failed but reconnecting in background (%v)", err)
+-		go cli.dispatchEvent(&events.Disconnected{})
++		go cli.dispatchEvent(&events.Disconnected{DeliveryConnectionID: cli.deliveryConnectionID.Load()})
+ 		go cli.autoReconnect(ctx)
+ 		return nil
+ 	}
+@@ -614,7 +617,7 @@ func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, rem
+ 		cli.clearResponseWaiters(xmlStreamEndNode)
+ 		if !cli.isExpectedDisconnect() && (cli.forceAutoReconnect.Swap(false) || remote) {
+ 			cli.Log.Debugf("Emitting Disconnected event")
+-			go cli.dispatchEvent(&events.Disconnected{})
++			go cli.dispatchEvent(&events.Disconnected{DeliveryConnectionID: cli.deliveryConnectionID.Load()})
+ 			go cli.autoReconnect(ctx)
+ 		} else if remote {
+ 			cli.Log.Debugf("OnDisconnect() called, but it was expected, so not emitting event")
+@@ -861,20 +864,39 @@ func (cli *Client) RemoveEventHandlers() {
+ }
+ 
+ func (cli *Client) makeFrameHandler(queue chan *waBinary.Node) func(ctx context.Context, data []byte) {
++	tracker := &deliveryTracker{cli: cli, id: cli.deliveryConnectionID.Add(1)}
++	tracker.mu.Lock()
++	tracker.emitLocked()
++	tracker.mu.Unlock()
+ 	return func(ctx context.Context, data []byte) {
+-		cli.handleFrame(ctx, data, queue)
++		cli.handleDeliveryFrame(ctx, data, queue, tracker)
+ 	}
+ }
+ 
+ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waBinary.Node) {
++	cli.handleDeliveryFrame(ctx, data, queue, nil)
++}
++func (cli *Client) handleDeliveryFrame(ctx context.Context, data []byte, queue chan *waBinary.Node, tracker *deliveryTracker) {
++	if len(data) == 0 {
++		if tracker != nil {
++			tracker.fail()
++		}
++		return
++	}
+ 	decompressed, err := waBinary.Unpack(data)
+ 	if err != nil {
++		if tracker != nil {
++			tracker.fail()
++		}
+ 		cli.Log.Warnf("Failed to decompress frame: %v", err)
+ 		cli.Log.Debugf("Errored frame hex: %s", hex.EncodeToString(data))
+ 		return
+ 	}
+ 	node, err := waBinary.Unmarshal(decompressed)
+ 	if err != nil {
++		if tracker != nil {
++			tracker.fail()
++		}
+ 		cli.Log.Warnf("Failed to decode node in frame: %v", err)
+ 		cli.Log.Debugf("Errored frame hex: %s", hex.EncodeToString(decompressed))
+ 		return
+@@ -888,15 +910,20 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
+ 	} else if cli.receiveResponse(ctx, node) {
+ 		// handled
+ 	} else if _, ok := cli.nodeHandlers[node.Tag]; ok {
++		if tracker != nil {
++			tracker.receive(node)
++		}
+ 		select {
+ 		case queue <- node:
+ 		case <-ctx.Done():
++			cli.deliveryTickets.Delete(node)
+ 		default:
+ 			cli.Log.Warnf("Handler queue is full, message ordering is no longer guaranteed")
+ 			go func() {
+ 				select {
+ 				case queue <- node:
+ 				case <-ctx.Done():
++					cli.deliveryTickets.Delete(node)
+ 				}
+ 			}()
+ 		}
+@@ -914,6 +941,7 @@ func (cli *Client) handlerQueueLoop(evtCtx, connCtx context.Context, queue chan
+ 		for {
+ 			select {
+ 			case node := <-queue:
++				cli.deliveryTickets.Delete(node)
+ 				// Make sure stream errors are handled even after disconnection so the appropriate auto-reconnect is done.
+ 				// Everything else
+ 				if node.Tag == "stream:error" {
+@@ -931,13 +959,14 @@ Loop:
+ 		select {
+ 		case node := <-queue:
+ 			if connCtx.Err() != nil {
++				cli.deliveryTickets.Delete(node)
+ 				cli.Log.Debugf("Closing handler queue loop before node handling")
+ 				return
+ 			}
+ 			doneChan := make(chan struct{})
+ 			start := time.Now()
+ 			go func() {
+-				cli.nodeHandlers[node.Tag](evtCtx, node)
++				cli.handleDeliveryNode(evtCtx, node)
+ 				duration := time.Since(start)
+ 				close(doneChan)
+ 				if duration > 5*time.Second {
+diff --git a/connectionevents.go b/connectionevents.go
+index 5d2e2e0..6e9c78f 100644
+--- a/connectionevents.go
++++ b/connectionevents.go
+@@ -201,7 +201,7 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
+ 		if err != nil {
+ 			cli.Log.Warnf("Failed to send post-connect passive IQ: %v", err)
+ 		}
+-		cli.dispatchEvent(&events.Connected{})
++		cli.dispatchEvent(&events.Connected{DeliveryConnectionID: deliveryConnection(ctx)})
+ 		cli.closeSocketWaitChan()
+ 	}()
+ }
+diff --git a/delivery.go b/delivery.go
+new file mode 100644
+index 0000000..4bc1902
+--- /dev/null
++++ b/delivery.go
+@@ -0,0 +1,104 @@
++// Copyright (c) 2026 LocalWhatsAppMCP contributors
++//
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this
++// file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++package whatsmeow
++
++// This local integration reports the receive boundary separately from the
++// asynchronous handler queue. It neither changes parsing nor owns persistence.
++import (
++	"context"
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/types/events"
++	"sync"
++	"sync/atomic"
++)
++
++type deliveryConnectionKey struct{}
++
++func deliveryConnection(ctx context.Context) uint64 {
++	id, _ := ctx.Value(deliveryConnectionKey{}).(uint64)
++	return id
++}
++
++type deliveryTracker struct {
++	mu                    sync.Mutex
++	cli                   *Client
++	id, received, pending uint64
++	boundary, failed      bool
++}
++type deliveryTicket struct {
++	tracker *deliveryTracker
++	node    *waBinary.Node
++	refs    atomic.Int64
++}
++type deliveryTicketKey struct{}
++
++func (d *deliveryTracker) emitLocked() {
++	d.cli.dispatchEvent(&events.DeliveryState{ConnectionID: d.id, Received: d.received, Pending: d.pending, Boundary: d.boundary, Failed: d.failed})
++}
++func (d *deliveryTracker) receive(node *waBinary.Node) {
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	d.received++
++	d.pending++
++	if node.Tag == "ib" {
++		for _, child := range node.GetChildren() {
++			if child.Tag == "offline" {
++				d.boundary = true
++			}
++		}
++	}
++	ticket := &deliveryTicket{tracker: d, node: node}
++	ticket.refs.Store(1)
++	d.cli.deliveryTickets.Store(node, ticket)
++	d.emitLocked()
++}
++func (cli *Client) deliveryDone(node *waBinary.Node) {
++	if value, ok := cli.deliveryTickets.Load(node); ok {
++		value.(*deliveryTicket).done()
++	}
++}
++func (ticket *deliveryTicket) done() {
++	if ticket.refs.Add(-1) != 0 {
++		return
++	}
++	d := ticket.tracker
++	d.cli.deliveryTickets.CompareAndDelete(ticket.node, ticket)
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	d.pending--
++	d.emitLocked()
++}
++
++// Acquire the hold before starting a continuation, while its parent ticket is
++// still alive. Socket generations travel with the context through async work.
++func (cli *Client) goWithDelivery(ctx context.Context, fn func()) {
++	ticket, _ := ctx.Value(deliveryTicketKey{}).(*deliveryTicket)
++	if ticket != nil {
++		ticket.refs.Add(1)
++	}
++	go func() {
++		if ticket != nil {
++			defer ticket.done()
++		}
++		fn()
++	}()
++}
++
++func (cli *Client) deliveryContext(ctx context.Context, node *waBinary.Node) context.Context {
++	if value, ok := cli.deliveryTickets.Load(node); ok {
++		ctx = context.WithValue(ctx, deliveryConnectionKey{}, value.(*deliveryTicket).tracker.id)
++		return context.WithValue(ctx, deliveryTicketKey{}, value.(*deliveryTicket))
++	}
++	return ctx
++}
++
++func (cli *Client) handleDeliveryNode(ctx context.Context, node *waBinary.Node) {
++	defer cli.deliveryDone(node)
++	cli.nodeHandlers[node.Tag](cli.deliveryContext(ctx, node), node)
++}
++
++func (d *deliveryTracker) fail() { d.mu.Lock(); defer d.mu.Unlock(); d.failed = true; d.emitLocked() }
+diff --git a/delivery_test.go b/delivery_test.go
+new file mode 100644
+index 0000000..a504199
+--- /dev/null
++++ b/delivery_test.go
+@@ -0,0 +1,149 @@
++// Copyright (c) 2026 LocalWhatsAppMCP contributors
++//
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this
++// file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++package whatsmeow
++
++import (
++	"context"
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/types/events"
++	waLog "go.mau.fi/whatsmeow/util/log"
++	"sync"
++	"testing"
++)
++
++func TestDeliveryBoundaryCannotOvertakeEarlierReceivedWork(t *testing.T) {
++	cli := &Client{Log: waLog.Noop, recvLog: waLog.Noop, nodeHandlers: map[string]nodeHandler{}}
++	var mu sync.Mutex
++	var latest events.DeliveryState
++	cli.AddEventHandler(func(evt any) {
++		if v, ok := evt.(*events.DeliveryState); ok {
++			mu.Lock()
++			latest = *v
++			mu.Unlock()
++		}
++	})
++	started, release := make(chan struct{}), make(chan struct{})
++	cli.nodeHandlers["message"] = func(context.Context, *waBinary.Node) { close(started); <-release }
++	cli.nodeHandlers["ib"] = cli.handleIB
++	queue := make(chan *waBinary.Node, 4)
++	handler := cli.makeFrameHandler(queue)
++	send := func(node waBinary.Node) {
++		body, err := waBinary.Marshal(node)
++		if err != nil {
++			t.Fatal(err)
++		}
++		handler(context.Background(), body)
++	}
++	send(waBinary.Node{Tag: "message", Attrs: waBinary.Attrs{"id": "earlier"}})
++	first := <-queue
++	finished := make(chan struct{})
++	go func() { cli.handleDeliveryNode(context.Background(), first); close(finished) }()
++	<-started
++	send(waBinary.Node{Tag: "ib", Content: []waBinary.Node{{Tag: "offline", Attrs: waBinary.Attrs{"count": "1"}}}})
++	cli.handleDeliveryNode(context.Background(), <-queue)
++	mu.Lock()
++	before := latest
++	mu.Unlock()
++	if !before.Boundary || before.Pending != 1 {
++		t.Fatalf("boundary overtook unfinished work: %+v", before)
++	}
++	close(release)
++	<-finished
++	mu.Lock()
++	after := latest
++	mu.Unlock()
++	if !after.Boundary || after.Pending != 0 {
++		t.Fatalf("completed work did not settle boundary: %+v", after)
++	}
++}
++func TestDeliveryEmptyBacklogAndNewConnection(t *testing.T) {
++	cli := &Client{Log: waLog.Noop, recvLog: waLog.Noop, nodeHandlers: map[string]nodeHandler{}}
++	var states []events.DeliveryState
++	cli.AddEventHandler(func(evt any) {
++		if v, ok := evt.(*events.DeliveryState); ok {
++			states = append(states, *v)
++		}
++	})
++	cli.nodeHandlers["ib"] = cli.handleIB
++	queue := make(chan *waBinary.Node, 1)
++	handler := cli.makeFrameHandler(queue)
++	body, _ := waBinary.Marshal(waBinary.Node{Tag: "ib", Content: []waBinary.Node{{Tag: "offline", Attrs: waBinary.Attrs{"count": "0"}}}})
++	handler(context.Background(), body)
++	cli.handleDeliveryNode(context.Background(), <-queue)
++	last := states[len(states)-1]
++	if last.ConnectionID != 1 || !last.Boundary || last.Pending != 0 {
++		t.Fatalf("empty backlog not completed: %+v", last)
++	}
++	cli.makeFrameHandler(queue)
++	last = states[len(states)-1]
++	if last.ConnectionID != 2 || last.Boundary {
++		t.Fatalf("new connection retained stale boundary: %+v", last)
++	}
++}
++
++func TestDeliveryMalformedFrameRemainsFailedAtBoundary(t *testing.T) {
++	cli := &Client{Log: waLog.Noop, recvLog: waLog.Noop, nodeHandlers: map[string]nodeHandler{}}
++	var latest events.DeliveryState
++	cli.AddEventHandler(func(evt any) {
++		if v, ok := evt.(*events.DeliveryState); ok {
++			latest = *v
++		}
++	})
++	cli.nodeHandlers["ib"] = cli.handleIB
++	queue := make(chan *waBinary.Node, 2)
++	handler := cli.makeFrameHandler(queue)
++	handler(context.Background(), []byte{0, 255})
++	body, _ := waBinary.Marshal(waBinary.Node{Tag: "ib", Content: []waBinary.Node{{Tag: "offline"}}})
++	handler(context.Background(), body)
++	cli.handleDeliveryNode(context.Background(), <-queue)
++	if !latest.Failed || !latest.Boundary || latest.Pending != 0 {
++		t.Fatalf("malformed receive forgotten at boundary: %+v", latest)
++	}
++}
++
++func TestDeliveryWaitsForAsyncAppStateContinuation(t *testing.T) {
++	cli := &Client{Log: waLog.Noop, recvLog: waLog.Noop, nodeHandlers: map[string]nodeHandler{}}
++	var mu sync.Mutex
++	var latest events.DeliveryState
++	settled := make(chan struct{})
++	var settledOnce sync.Once
++	cli.AddEventHandler(func(evt any) {
++		if v, ok := evt.(*events.DeliveryState); ok {
++			mu.Lock()
++			latest = *v
++			mu.Unlock()
++			if v.Boundary && v.Pending == 0 {
++				settledOnce.Do(func() { close(settled) })
++			}
++		}
++	})
++	started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	cli.nodeHandlers["notification"] = func(ctx context.Context, _ *waBinary.Node) {
++		cli.goWithDelivery(ctx, func() { close(started); <-release })
++		close(finished)
++	}
++	cli.nodeHandlers["ib"] = cli.handleIB
++	queue := make(chan *waBinary.Node, 2)
++	handler := cli.makeFrameHandler(queue)
++	body, _ := waBinary.Marshal(waBinary.Node{Tag: "notification"})
++	handler(context.Background(), body)
++	cli.handleDeliveryNode(context.Background(), <-queue)
++	<-started
++	<-finished
++	body, _ = waBinary.Marshal(waBinary.Node{Tag: "ib", Content: []waBinary.Node{{Tag: "offline"}}})
++	handler(context.Background(), body)
++	cli.handleDeliveryNode(context.Background(), <-queue)
++	mu.Lock()
++	pending := latest.Pending
++	mu.Unlock()
++	if pending != 1 {
++		t.Fatalf("async app state overtaken: pending=%d", pending)
++	}
++	close(release)
++	// Receive the exact completion event instead of sleeping or polling.
++	<-settled
++}
+diff --git a/message.go b/message.go
+index 98e97f6..ec69993 100644
+--- a/message.go
++++ b/message.go
+@@ -921,7 +921,7 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
+ 	}
+ 
+ 	if protoMsg.GetAppStateSyncKeyShare() != nil {
+-		go cli.handleAppStateSyncKeyShare(context.WithoutCancel(ctx), protoMsg.AppStateSyncKeyShare)
++		cli.goWithDelivery(ctx, func() { cli.handleAppStateSyncKeyShare(context.WithoutCancel(ctx), protoMsg.AppStateSyncKeyShare) })
+ 	}
+ 
+ 	if info.Category == "peer" {
+diff --git a/notification.go b/notification.go
+index cac7597..d53b81a 100644
+--- a/notification.go
++++ b/notification.go
+@@ -476,11 +476,11 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
+ 	}
+ 	switch notifType {
+ 	case "encrypt":
+-		go cli.handleEncryptNotification(ctx, node)
++		cli.goWithDelivery(ctx, func() { cli.handleEncryptNotification(ctx, node) })
+ 	case "server_sync":
+-		go cli.handleAppStateNotification(ctx, node)
++		cli.goWithDelivery(ctx, func() { cli.handleAppStateNotification(ctx, node) })
+ 	case "account_sync":
+-		go cli.handleAccountSyncNotification(ctx, node)
++		cli.goWithDelivery(ctx, func() { cli.handleAccountSyncNotification(ctx, node) })
+ 	case "devices":
+ 		cli.handleDeviceNotification(ctx, node)
+ 	case "fbid:devices":
+diff --git a/types/events/events.go b/types/events/events.go
+index a273127..fb18f86 100644
+--- a/types/events/events.go
++++ b/types/events/events.go
+@@ -94,7 +94,7 @@ type QRScannedWithoutMultidevice struct{}
+ // Connected is emitted when the client has successfully connected to the WhatsApp servers
+ // and is authenticated. The user who the client is authenticated as will be in the device store
+ // at this point, which is why this event doesn't contain any data.
+-type Connected struct{}
++type Connected struct{ DeliveryConnectionID uint64 }
+ 
+ // KeepAliveTimeout is emitted when the keepalive ping request to WhatsApp web servers times out.
+ //
+@@ -269,7 +269,7 @@ type StreamError struct {
+ }
+ 
+ // Disconnected is emitted when the websocket is closed by the server.
+-type Disconnected struct{}
++type Disconnected struct{ DeliveryConnectionID uint64 }
+ 
+ // HistorySync is emitted when the phone has sent a blob of historical messages.
+ type HistorySync struct {
+@@ -677,3 +677,14 @@ type NotifyAccountReachoutTimelock struct {
+ 	IsActive            bool                `json:"is_active,omitzero"`
+ 	TimeEnforcementEnds jsontime.UnixString `json:"time_enforcement_ends,omitzero"`
+ }
++
++// DeliveryState is a local receive/handler barrier. Boundary only says the
++// server's offline marker has arrived: Pending must also reach zero. The
++// application remains responsible for history processing and durable writes.
++type DeliveryState struct {
++	ConnectionID uint64
++	Received     uint64
++	Pending      uint64
++	Boundary     bool
++	Failed       bool
++}

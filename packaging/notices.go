@@ -50,7 +50,12 @@ func collect() error {
 			}
 			m := *pkg.Module
 			if m.Replace != nil {
-				m = *m.Replace
+				// Local patched copies retain the original module identity and pin
+				// in the notice; only their license source directory changes.
+				m.Dir = m.Replace.Dir
+				if m.Replace.Version != "" {
+					m.Path, m.Version = m.Replace.Path, m.Replace.Version
+				}
 			}
 			modules[m.Path+"@"+m.Version] = m
 		}

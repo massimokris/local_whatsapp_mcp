@@ -6,9 +6,16 @@ Upstream is [openclaw/wacli](https://github.com/openclaw/wacli), pinned at
 [LICENSE.upstream](LICENSE.upstream) and must accompany distributed binaries.
 
 `content-policy.patch` adds LocalWhatsAppMCP's immutable process policy at the
-upstream app boundary. It does not replace WhatsApp connection/session ownership,
+upstream app boundary and adds explicit sync completion tracking. It does not
+replace WhatsApp connection/session ownership,
 SQLite migrations, message parsing, media recovery, or the command protocol.
 See [selective storage research](../../docs/research/selective-storage.md).
+
+`whatsmeow-delivery.patch` applies to the exact transitive dependency
+`go.mau.fi/whatsmeow v0.0.0-20261017175727-b2b1e71d45e2`. It adds a per-socket
+receive/handler barrier and holds for asynchronous app-state continuations. It
+preserves upstream parsing, reconnection, acknowledgements, and store ownership.
+The copied dependency retains its MPL-2.0 source and license notices.
 
 ## Build and verification
 
@@ -24,13 +31,19 @@ was verified on Apple silicon; Intel cross-distribution has not been verified.
 ```
 
 The scripts fetch the exact commit over HTTPS, verify its Git object, apply the
-patch with `git apply --check`, and build from that source. Generated source and
+patch with `git apply --check`, and build from that source.
+`prepare-whatsmeow.sh` verifies the exact Go module version, uses Go's verified
+module download, copies it into the disposable checkout's `.local-whatsmeow/`,
+checks/applies its delivery patch, and installs a local Go module replacement.
+The shared Go module cache is never edited. Generated source and
 executables live in ignored `.build/`. `prepare.sh` intentionally resets only
 its disposable `.build/pinned-source` checkout; make patch changes elsewhere.
 Do not place WhatsApp account data in a source/build checkout.
 
 `build.sh` prints the executable path. `test.sh` runs the complete upstream Go
-suite both with and without FTS5, then vet and whitespace checks. Policy fixtures
+suite both with and without FTS5, then vet and whitespace checks. It also runs
+the dependency's deterministic delivery-barrier tests with the Go race detector.
+Policy and completion fixtures
 use synthetic accounts and disposable stores; no login or network WhatsApp data
 is required. Live QR/linking and actual phone media recovery require the user's
 installation acceptance test.
@@ -64,6 +77,42 @@ The policy stays fixed until exit. The supervisor must stop and await all old
 writers before publishing a replacement and must await this exact revision's
 acknowledgement before reopening access. Loading the file is not evidence of
 WhatsApp connectivity or complete history.
+
+### Explicit sync completion
+
+The supervisor supplies a fresh `WACLI_SYNC_RUN_ID` for each owned process.
+`sync_state` events and five-second `sync_snapshot` events carry `run_id`, the
+immutable policy `revision`, a monotonically increasing per-socket
+`connection_id`, and `state` (`unknown`, `syncing`, `caught_up`, or `error`).
+`connected`, `disconnected`, and `connection_check_failed` carry the same identity.
+Connection evidence is emitted before a completion transition. Ended socket
+generations cannot reopen, even if their handlers finish late.
+
+The dependency barrier counts work when a node arrives, before queue insertion,
+and completes it only when its handler and retained-content continuations return.
+An offline marker may arrive or finish before earlier work, but cannot establish
+catch-up while any received work remains. Manual history download keeps received
+history processing inside the application's tracked work. Ordered app-state
+writes, startup replay, late recovery snapshots, and poll side effects hold work
+until their persistence boundary finishes.
+
+`store/sync-debts.json` is a private, atomically replaced recovery journal, synced
+with its parent directory. It records work identities and conversation identities,
+not message content. Selected message/history-download failures and interrupted
+writes survive socket and process changes; unrelated successful work cannot
+forgive them. A successful retry clears its own debt. Edits use an additional
+mutation fingerprint so replaying an older original cannot recover an unsaved
+edit. Scope exclusions and optional attachment downloads do not become message
+sync errors. An unreadable/unwritable journal prevents starting sync and requires
+repair while preserving the archive.
+
+Only explicit completion events establish `caught_up`; periodic snapshots prove
+liveness and can invalidate a failed connection check. Quiet healthy connections
+remain caught up without a time expiry. `last_synced_at` remains the persisted
+successful activity marker, independently of current completion. Catch-up means
+selected chats' available updates were saved through the current WhatsApp delivery
+boundary; it does not promise complete historical coverage. Synthetic barrier and
+recovery tests do not establish live reconnect or sleep/wake compatibility.
 
 Content skips are distinct from retained messages and storage failures. The
 patch gates live/history messages, status, locations, reactions/edits, calls,

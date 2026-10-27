@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -25,10 +26,11 @@ type Engine struct {
 	status      Status
 	cancel      context.CancelFunc
 	done        chan struct{}
+	sync        syncEvidence
 }
 
 func New(binary, dir string) *Engine {
-	return &Engine{binary: binary, dir: dir, status: Status{Status: "disconnected", Detail: "Connect WhatsApp to import available history."}}
+	return &Engine{binary: binary, dir: dir, status: Status{SyncState: SyncUnknown, Status: "disconnected", Detail: "Connect WhatsApp to import available history."}}
 }
 
 // RestoreSession reads upstream-owned authentication before the service publishes
@@ -67,7 +69,9 @@ func (e *Engine) sessionAuthenticated(ctx context.Context) (bool, error) {
 }
 func (e *Engine) Status() Status {
 	e.mu.Lock()
+	e.expireSyncLocked(time.Now())
 	status := e.status
+	status.SyncState = NormalizeSyncState(status.SyncState)
 	e.mu.Unlock()
 	status.LastSyncedAt = e.lastSuccessfulSync()
 	return status
@@ -109,6 +113,7 @@ func (e *Engine) Start(ctx context.Context, p Policy, link bool) error {
 	done := make(chan struct{})
 	e.cancel = cancel
 	e.done = done
+	e.invalidateSyncLocked()
 	e.status.Status = "connecting"
 	e.status.Detail = "Starting WhatsApp and applying saved chat scope."
 	e.status.QR = ""
@@ -137,6 +142,8 @@ func (e *Engine) Start(ctx context.Context, p Policy, link bool) error {
 func (e *Engine) Stop(ctx context.Context) error {
 	e.mu.Lock()
 	cancel, done := e.cancel, e.done
+	e.sync.stopping = true
+	e.invalidateSyncLocked()
 	e.mu.Unlock()
 	if cancel == nil {
 		return nil
@@ -181,7 +188,11 @@ func (e *Engine) Logout(ctx context.Context) error {
 		}
 	}
 	e.mu.Lock()
-	e.status = Status{Status: "disconnected", Detail: "WhatsApp is disconnected. Your archive stays on this Mac."}
+	syncState := SyncUnknown
+	if e.status.SyncState == SyncError {
+		syncState = SyncError
+	}
+	e.status = Status{SyncState: syncState, Status: "disconnected", Detail: "WhatsApp is disconnected. Your archive stays on this Mac."}
 	e.mu.Unlock()
 	return nil
 }
@@ -189,8 +200,10 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 	defer close(done)
 	defer func() {
 		e.mu.Lock()
+		e.invalidateSyncLocked()
 		e.status.Status = "disconnected"
 		e.status.Detail = "WhatsApp sync is stopped."
+		e.sync = syncEvidence{}
 		e.status.QR = ""
 		e.mu.Unlock()
 	}()
@@ -201,8 +214,13 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 		if link {
 			args = []string{"--owner-stdin", "--events", "auth", "--follow", "--qr-format", "text"}
 		}
+		runID := rand.Text()
+		e.mu.Lock()
+		e.sync = syncEvidence{runID: runID, revision: p.Revision, lastSnapshot: time.Now()}
+		e.invalidateSyncLocked()
+		e.mu.Unlock()
 		cmd := exec.Command(e.binary, e.args(args...)...)
-		cmd.Env = append(os.Environ(), "WACLI_DEVICE_LABEL=LocalWhatsAppMCP")
+		cmd.Env = append(os.Environ(), "WACLI_DEVICE_LABEL=LocalWhatsAppMCP", "WACLI_SYNC_RUN_ID="+runID)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdout = io.Discard
 		lifetime, lifetimeErr := cmd.StdinPipe()
@@ -238,18 +256,31 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 				case <-stopped:
 				}
 			}()
+			go func() {
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stopped:
+						return
+					case now := <-ticker.C:
+						e.mu.Lock()
+						expired := e.sync.runID == runID && e.expireSyncLocked(now)
+						e.mu.Unlock()
+						if expired {
+							// A fresh process must supply a new delivery boundary; a late
+							// heartbeat from this stalled process cannot restore success.
+							_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+							return
+						}
+					}
+				}
+			}()
 			scanner := bufio.NewScanner(stderr)
 			scanner.Buffer(make([]byte, 4096), 1<<20)
 			policyLoaded := false
 			for scanner.Scan() {
-				var event struct {
-					Event string `json:"event"`
-					Data  struct {
-						Revision int64  `json:"revision"`
-						Code     string `json:"code"`
-					} `json:"data"`
-					TS int64 `json:"ts"`
-				}
+				var event engineEvent
 				if json.Unmarshal(scanner.Bytes(), &event) != nil {
 					continue
 				}
@@ -268,36 +299,9 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 						first = false
 					}
 				}
-				e.mu.Lock()
-				e.status.LastEventAt = time.Now().UTC().Format(time.RFC3339)
-				switch event.Event {
-				case "qr_code":
-					e.status.Status = "linking"
-					e.status.QR = event.Data.Code
-					e.status.Linked = false
-					e.status.Detail = "Scan this code using WhatsApp Linked Devices."
-				case "connected":
-					e.status.Status = "ready"
-					e.status.QR = ""
-					e.status.Detail = "Connected. Available history may still arrive."
-					e.status.Linked = true
-				case "history_sync":
-					e.status.Status = "syncing"
-					e.status.Detail = "Receiving available history from WhatsApp. History coverage may be partial."
-				case "progress":
-					e.status.Status = "syncing"
-					e.status.Detail = "Receiving WhatsApp updates. Available history may still arrive."
-				case "disconnected":
-					e.status.Status = "connecting"
-					e.status.QR = ""
-					e.status.Detail = "Reconnecting to WhatsApp."
-				case "logged_out":
-					e.status.Status = "attention"
-					e.status.QR = ""
-					e.status.Linked = false
-					e.status.Detail = "WhatsApp disconnected this linked device. Connect WhatsApp again."
+				if policyLoaded {
+					e.observeEvent(event, time.Now())
 				}
-				e.mu.Unlock()
 			}
 			_ = cmd.Wait()
 			lifetime.Close()
@@ -323,6 +327,7 @@ func (e *Engine) run(ctx context.Context, done chan struct{}, p Policy, link boo
 }
 func (e *Engine) setAttention(detail string) {
 	e.mu.Lock()
+	e.invalidateSyncLocked()
 	e.status.Status = "attention"
 	e.status.Detail = detail
 	e.status.QR = ""
