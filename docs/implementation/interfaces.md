@@ -72,6 +72,10 @@ Manual UI setup still creates a grant through private control and lets the user 
 
 Send tools require a caller-generated `request_id`. The service durably records an uncertain outcome before dispatch and never dispatches the same agent/request identifier again. An unchanged retry returns its saved outcome; different content with that identifier is rejected. A transport error is not proof that nothing was sent: inspect the conversation before deciding whether to send again. Accepted sends are distinct from observed delivery/read state.
 
+Text sends use the engine’s supported self-send opt-in after the same scope and sending-permission checks. Self-send acceptance still does not guarantee delivery.
+
+A definite pre-send rejection returns `status: "failed"` and a safe `error`; unrecognized errors, timeouts, interrupted processes and malformed responses remain `status: "uncertain"`. Send outcomes retain their safe diagnostic for unchanged retries, including after restart, without another dispatch. Only known pre-send engine errors are classified as failed; raw engine logs are never returned or saved in the send ledger. Existing uncertain records remain protected and are not retried after an upgrade.
+
 The client-specific installer and `setup`, `headers`, `doctor`, and `stdio` commands are removed. The bundled executable retains `serve` and `control` for the native app. Existing bearer grants retain their identity and permissions; clients referencing removed commands must be reconfigured by their agent. The app does not rewrite those files. Setup uses generic copyable instructions and an inline manual option; saved connections expose credentials and permission management in expandable cards.
 
 Legacy cloud settings must not restore external access; ignore their configuration and remove hosted-agent grants while preserving local credentials and sending settings. The current service does not start provider processes or expose their setup commands. The superseded cloud boundary is retained in the [historical implementation record](comments/104-cloud.md#superseded--2026-10-23).

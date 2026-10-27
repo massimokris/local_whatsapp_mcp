@@ -330,16 +330,24 @@ func (e *Engine) setAttention(detail string) {
 }
 
 type limitedBuffer struct {
-	bytes.Buffer
-	limit int
+	buffer    bytes.Buffer
+	limit     int
+	truncated bool
 }
 
 func (b *limitedBuffer) Write(p []byte) (int, error) {
-	if b.Len()+len(p) > b.limit {
+	if b.buffer.Len()+len(p) > b.limit {
+		b.truncated = true
 		return 0, errors.New("structured engine response exceeded its limit")
 	}
-	return b.Buffer.Write(p)
+	return b.buffer.Write(p)
 }
+
+// Keep bytes.Buffer private: its promoted ReadFrom would let io.Copy bypass
+// Write and silently evade the response limit.
+func (b *limitedBuffer) Bytes() []byte  { return b.buffer.Bytes() }
+func (b *limitedBuffer) String() string { return b.buffer.String() }
+
 func (e *Engine) Call(ctx context.Context, write bool, args ...string) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
@@ -353,7 +361,14 @@ func (e *Engine) Call(ctx context.Context, write bool, args ...string) (json.Raw
 	stderr := &limitedBuffer{limit: 1 << 20}
 	cmd.Stdout = out
 	cmd.Stderr = stderr
-	runErr := cmd.Run()
+	sending := write && len(args) > 0 && args[0] == "send"
+	runErr := cmd.Start()
+	if runErr != nil && sending {
+		return nil, &SendError{Detail: "WhatsApp engine could not start; no message was sent"}
+	}
+	if runErr == nil {
+		runErr = cmd.Wait()
+	}
 	var env struct {
 		Success bool            `json:"success"`
 		Data    json.RawMessage `json:"data"`
@@ -361,6 +376,9 @@ func (e *Engine) Call(ctx context.Context, write bool, args ...string) (json.Raw
 	}
 	parseErr := json.Unmarshal(out.Bytes(), &env)
 	if runErr != nil || parseErr != nil || !env.Success {
+		if sending {
+			return nil, sendCallError(out, stderr, runErr, ctx.Err())
+		}
 		detail := strings.ToLower(env.Error + stderr.String())
 		switch {
 		case strings.Contains(detail, "media_not_cached"):

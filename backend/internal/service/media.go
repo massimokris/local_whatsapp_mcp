@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/massi/localwhatsappmcp/internal/engine"
 )
 
 func (s *Service) send(ctx context.Context, v Send, file bool) (any, error) {
@@ -89,7 +91,7 @@ func (s *Service) send(ctx context.Context, v Send, file bool) (any, error) {
 			args = append(args, "--caption", v.Caption)
 		}
 	} else {
-		args = []string{"send", "text", "--to", v.ChatID, "--message", v.Text, "--no-preview"}
+		args = []string{"send", "text", "--to", v.ChatID, "--message", v.Text, "--no-preview", "--allow-self"}
 	}
 	s.mu.Lock()
 	if old, ok := s.cfg.Sends[key]; ok {
@@ -97,7 +99,7 @@ func (s *Service) send(ctx context.Context, v Send, file bool) (any, error) {
 		if old.Hash != hash {
 			return nil, errors.New("request_id was already used with different content")
 		}
-		return map[string]any{"status": old.Status, "message_id": old.MessageID, "request_id": v.RequestID, "note": "A pending or uncertain send must not be retried with a new identifier. Check the selected conversation before deciding whether to send again."}, nil
+		return sendResult(old, v.RequestID), nil
 	}
 	s.cfg.Sends[key] = sendRecord{Hash: hash, Status: "uncertain"}
 	err = s.saveLocked()
@@ -117,13 +119,24 @@ func (s *Service) send(ctx context.Context, v Send, file bool) (any, error) {
 	}
 	raw, callErr := s.opt.Engine.Call(ctx, true, args...)
 	rec := sendRecord{Hash: hash, Status: "uncertain"}
-	if callErr == nil {
+	if callErr != nil {
+		rec.Error = "WhatsApp send failed without a confirmed outcome; check the conversation before sending again"
+		var sendErr *engine.SendError
+		if errors.As(callErr, &sendErr) {
+			rec.Error = sendErr.Detail
+			if !sendErr.Uncertain {
+				rec.Status = "failed"
+			}
+		}
+	} else {
 		var result struct {
 			ID string `json:"id"`
 		}
 		if json.Unmarshal(raw, &result) == nil && result.ID != "" {
 			rec.Status = "accepted"
 			rec.MessageID = result.ID
+		} else {
+			rec.Error = "WhatsApp send returned no valid message ID; check the conversation before sending again"
 		}
 	}
 	s.mu.Lock()
@@ -133,7 +146,22 @@ func (s *Service) send(ctx context.Context, v Send, file bool) (any, error) {
 	if saveErr != nil {
 		return nil, errors.New("send outcome could not be saved; reuse this request_id and check the conversation before sending again")
 	}
-	return map[string]any{"status": rec.Status, "message_id": rec.MessageID, "request_id": v.RequestID, "note": "Accepted means WhatsApp accepted the send, not observed delivery or read. If uncertain, inspect the conversation; this request identifier will never dispatch again."}, nil
+	return sendResult(rec, v.RequestID), nil
+}
+
+func sendResult(rec sendRecord, requestID string) map[string]any {
+	note := "The send outcome is uncertain. Check the selected conversation before deciding whether to send again; this request identifier will never dispatch again."
+	switch rec.Status {
+	case "accepted", "sent":
+		note = "Accepted means WhatsApp accepted the send, not observed delivery or read. This request identifier will never dispatch again."
+	case "failed":
+		note = "No WhatsApp message was sent. This request identifier will never dispatch again."
+	}
+	out := map[string]any{"status": rec.Status, "message_id": rec.MessageID, "request_id": requestID, "note": note}
+	if rec.Error != "" {
+		out["error"] = rec.Error
+	}
+	return out
 }
 
 type attachment struct {

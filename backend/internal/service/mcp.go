@@ -240,8 +240,8 @@ func (s *Service) mcpHandler() http.Handler {
 	register(server, "read_context", "Read chronological neighbors around a permitted message.", s.readContext)
 	register(server, "get_updates", "Read scoped changes. Capture a checkpoint before rebuilding after expiry, then replay it after export. Hidden changes are consumed without exposing them.", s.updates)
 	register(server, "get_attachment", "Download an authorized attachment on demand. Returns an authenticated download URL and up to 1 MiB of base64 bytes; repeat with next_offset to consume larger files.", s.getAttachment)
-	register(server, "send_text", "Send new text only when the app enabled sending. Reuse request_id on retries; accepted does not mean delivered/read.", func(ctx context.Context, v Send) (any, error) { return s.send(ctx, v, false) })
-	register(server, "send_attachment", "Send base64 attachment bytes (maximum 20 MiB) with optional caption. Reuse request_id on retries.", func(ctx context.Context, v Send) (any, error) { return s.send(ctx, v, true) })
+	register(server, "send_text", "Send new text, including self-chat text, only when the app enabled sending. Failed means no message was sent; uncertain may have sent. Reuse request_id on retries; accepted does not mean delivered/read.", func(ctx context.Context, v Send) (any, error) { return s.send(ctx, v, false) })
+	register(server, "send_attachment", "Send base64 attachment bytes (maximum 20 MiB) with optional caption. Failed means no message was sent; uncertain may have sent. Reuse request_id on retries.", func(ctx context.Context, v Send) (any, error) { return s.send(ctx, v, true) })
 	register(server, "check_status", "Report sync state and available-history limitations without exposing other conversations.", func(ctx context.Context, _ struct{}) (any, error) {
 		p, err := s.access(ctx, false)
 		if err != nil {

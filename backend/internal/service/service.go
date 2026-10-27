@@ -40,6 +40,7 @@ type sendRecord struct {
 	Hash      string `json:"hash"`
 	Status    string `json:"status"`
 	MessageID string `json:"message_id,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 type config struct {
 	Version                  int                   `json:"version"`
