@@ -47,6 +47,7 @@ final class AppModel: ObservableObject {
     private var refreshing = false
     private var stateRevision = 0
     private var stopping = false
+    private var wakeRequested = false
     private var didLoad = false
     private var navigationRevision = 0
     private var pendingPanelOpen = false
@@ -79,6 +80,8 @@ final class AppModel: ObservableObject {
     }
     var statusLabel: String {
         if whatsappDisconnecting { return "Disconnecting…" }
+        if !serviceAvailable && whatsappLinked { return "Reconnecting…" }
+        if state.whatsapp.syncState == "error" && whatsappConnected { return "Needs attention" }
         switch state.whatsapp.status {
         case "ready", "connected": return "Connected to this Mac"
         case "syncing", "importing", "receiving_history": return "Syncing messages…"
@@ -90,12 +93,12 @@ final class AppModel: ObservableObject {
         }
     }
     var homeSubtitle: String {
-        guard whatsappConnected, !whatsappDisconnecting, !whatsappDisconnectPending else { return statusLabel }
+        guard serviceAvailable, whatsappConnected, state.whatsapp.syncState != "error", !whatsappDisconnecting, !whatsappDisconnectPending else { return statusLabel }
         return syncSummary.text()
     }
     var connectedChatsSummary: String {
         guard let count = syncSummary.connectedChatCount else { return "Loading connected chats…" }
-        return "\(count) \(count == 1 ? "chat" : "chats") connected"
+        return "\(count.formatted(.number.locale(Locale(identifier: "en_US")))) \(count == 1 ? "chat" : "chats") connected"
     }
     private var syncSummary: WhatsAppSyncSummary {
         let catalog = isDemo || lastCatalogRefresh != .distantPast ? selection.chats : nil
@@ -137,7 +140,7 @@ final class AppModel: ObservableObject {
     }
     func refresh() async {
         expireInvitation()
-        guard !isDemo, !refreshing, !stopping else { return }
+        guard !isDemo, !refreshing, !busy, !stopping else { return }
         refreshing = true
         let refreshRevision = stateRevision
         var receivedState = false
@@ -164,7 +167,10 @@ final class AppModel: ObservableObject {
                 lastCatalogRefresh = Date()
             }
         } catch {
-            if refreshRevision == stateRevision && !receivedState { serviceAvailable = false }
+            if refreshRevision == stateRevision && !receivedState {
+                serviceAvailable = false
+                state.whatsapp.syncState = "unknown"
+            }
             if !busy && refreshRevision == stateRevision { self.error = "Connecting to WhatsApp. \(error.localizedDescription)" }
         }
     }
@@ -259,10 +265,18 @@ final class AppModel: ObservableObject {
     }
     func wake() {
         guard !isDemo, !stopping else { return }
-        Task {
-            do { try await runtime.start(); _ = try await runtime.control(method: "POST", path: "/lifecycle/wake", body: Data("{}".utf8)); await refresh() }
-            catch { self.error = error.localizedDescription }
+        if busy {
+            stateRevision += 1
+            state.whatsapp.syncState = "unknown"
+            wakeRequested = true
+            return
         }
+        mutate(method: "POST", path: "/lifecycle/wake", body: [:])
+    }
+    private func resumeQueuedWake() {
+        guard wakeRequested else { return }
+        wakeRequested = false
+        wake()
     }
     func beginPairing() {
         setupGeneration += 1
@@ -318,7 +332,7 @@ final class AppModel: ObservableObject {
         }
         busy = true
         Task {
-            defer { busy = false }
+            defer { busy = false; resumeQueuedWake() }
             do {
                 let body = try JSONSerialization.data(withJSONObject: ["name": name])
                 let data = try await runtime.control(method: "POST", path: "/pairing", body: body)
@@ -414,6 +428,7 @@ final class AppModel: ObservableObject {
                 stateRevision += 1
                 busy = false
                 if generation == credentialsGeneration { loadingCredentials = false }
+                resumeQueuedWake()
             }
             do {
                 let payload = existingID == nil ? try JSONSerialization.data(withJSONObject: ["name": name]) : nil
@@ -502,27 +517,45 @@ final class AppModel: ObservableObject {
         guard !busy else { return }
         // Polls that predate this action or its result cannot restore old state.
         stateRevision += 1
+        if ["/whatsapp/connect", "/whatsapp/disconnect", "/lifecycle/wake", "/scope"].contains(path) {
+            state.whatsapp.syncState = "unknown"
+            if path == "/whatsapp/connect" || path == "/lifecycle/wake" { state.whatsapp.status = "connecting" }
+        }
         busy = true
         error = nil
         Task {
-            defer { stateRevision += 1; busy = false; finished?() }
+            var refreshAfterFailure = false
+            defer {
+                stateRevision += 1
+                busy = false
+                finished?()
+                resumeQueuedWake()
+                if refreshAfterFailure { Task { await refresh() } }
+            }
             do {
+                try await runtime.start()
                 let payload = try body.map { try JSONSerialization.data(withJSONObject: $0) }
                 let data = try await runtime.control(method: method, path: path, body: payload)
                 state = try JSONDecoder().decode(ServiceState.self, from: data)
+                serviceAvailable = true
                 resolvePanelOpening()
                 completion?()
             } catch {
                 self.error = error.localizedDescription
-                await refresh()
+                refreshAfterFailure = true
             }
         }
     }
     private func loadDemo(page: String?) {
         serviceAvailable = true
-        state = ServiceState(whatsapp: .init(status: "syncing", linked: true, lastSyncedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120))), scope: Scope(mode: "selected", chatIDs: ["work", "family"]), mcp: .init(url: "http://127.0.0.1:32191", status: "ready"))
+        state = ServiceState(whatsapp: .init(status: "ready", linked: true, lastSyncedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120)), syncState: "caught_up"), scope: Scope(mode: "selected", chatIDs: ["work", "family"]), mcp: .init(url: "http://127.0.0.1:32191", status: "ready"))
         selection = ChatSelection(chats: [Chat(id: "work", name: "Product team", kind: "group", lastActivity: "2026-10-23T07:30:00Z"), Chat(id: "family", name: "Family", kind: "group", lastActivity: "2026-10-23T07:20:00Z"), Chat(id: "renee", name: "Renée Santos", phone: "+1 (415) 555-0123", kind: "direct"), Chat(id: "long", name: "Weekend hiking plans and the very ambitious autumn road trip", kind: "group"), Chat(id: "phone", phone: "+44 20 5550 0123", kind: "direct")] + (1...100).map { Chat(id: "project-\($0)", name: "Project \($0)", kind: "group") }, selectedIDs: ["work", "family"])
         switch page {
+        case "synced", "syncing":
+            state.scope = Scope(mode: "all")
+            selection.chats += (101...1287).map { Chat(id: "project-\($0)", name: "Project \($0)", kind: "group") }
+            state.whatsapp.syncState = page == "synced" ? "caught_up" : "syncing"
+            if page == "syncing" { state.whatsapp.lastSyncedAt = ISO8601DateFormatter().string(from: Date()) }
         case "settings-enabled": self.page = .settings; loginEnabled = true
         case "mcp", "mcp-agents", "mcp-expanded", "mcp-credentials", "mcp-long":
             self.page = .mcp

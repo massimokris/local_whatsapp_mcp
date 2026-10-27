@@ -8,15 +8,17 @@ public struct WhatsAppState: Codable, Sendable {
     public var disconnectPending: Bool?
     public var lastEventAt: String?
     public var lastSyncedAt: String?
+    public var syncState: String?
     public var isConnected: Bool {
         ["connected", "ready", "syncing", "importing", "receiving_history"].contains(status ?? "")
     }
     public var isLinked: Bool { linked == true || isConnected }
-    public init(status: String? = nil, detail: String? = nil, qr: String? = nil, lastEventAt: String? = nil, linked: Bool? = nil, disconnectPending: Bool? = nil, lastSyncedAt: String? = nil) {
+    public init(status: String? = nil, detail: String? = nil, qr: String? = nil, lastEventAt: String? = nil, linked: Bool? = nil, disconnectPending: Bool? = nil, lastSyncedAt: String? = nil, syncState: String? = nil) {
         self.status = status; self.detail = detail; self.qr = qr; self.lastEventAt = lastEventAt; self.linked = linked; self.disconnectPending = disconnectPending
         self.lastSyncedAt = lastSyncedAt
+        self.syncState = syncState
     }
-    enum CodingKeys: String, CodingKey { case status, detail, qr, linked; case lastEventAt = "last_event_at"; case lastSyncedAt = "last_synced_at"; case disconnectPending = "disconnect_pending" }
+    enum CodingKeys: String, CodingKey { case status, detail, qr, linked; case lastEventAt = "last_event_at"; case lastSyncedAt = "last_synced_at"; case syncState = "sync_state"; case disconnectPending = "disconnect_pending" }
 }
 public struct Scope: Codable, Sendable {
     public var mode: String

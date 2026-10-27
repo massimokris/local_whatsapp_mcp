@@ -203,6 +203,135 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(model.selection.query, "Family")
     }
 
+    func testSyncPreviewLabelsAndConnectionFailures() {
+        let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-SyncTests-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let model = AppModel(environment: ["LWMCP_DEMO": "1", "LWMCP_DEMO_PAGE": "synced"], pasteboard: pasteboard)
+        XCTAssertEqual(model.homeSubtitle, "Synced just now · 1,292 chats connected")
+        model.state.whatsapp.syncState = "syncing"
+        XCTAssertEqual(model.homeSubtitle, "Syncing messages… · 1,292 chats connected")
+        model.state.whatsapp.syncState = "caught_up"
+        for (status, label) in [("connecting", "Reconnecting…"), ("attention", "Needs attention"), ("disconnected", "Connection paused")] {
+            model.state.whatsapp.status = status
+            XCTAssertEqual(model.homeSubtitle, label)
+        }
+        model.state.whatsapp.status = "ready"
+        model.state.whatsapp.syncState = "error"
+        XCTAssertEqual(model.homeSubtitle, "Needs attention")
+    }
+
+    func testWakeClearsSuccessImmediatelyAndRejectsEarlierPoll() async throws {
+        let caughtUp = serviceState(status: "ready", scope: "all", syncState: "caught_up")
+        let (model, fixture) = try makeModel(state: caughtUp)
+        await model.refresh()
+        XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+        try fixture.hold("state")
+        fixture.remove("state-requested")
+        let earlierPoll = Task { await model.refresh() }
+        try await waitUntil { fixture.exists("state-requested") }
+        try fixture.hold("wake")
+        try fixture.write(serviceState(status: "connecting", scope: "all", syncState: "unknown"), to: "wake-response.json")
+        model.wake()
+        XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
+        try await waitUntil { fixture.exists("wake-requested") }
+        fixture.release("state")
+        await earlierPoll.value
+        XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
+        fixture.release("wake")
+        try await waitUntil { !model.busy }
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
+        try fixture.write(caughtUp, to: "state.json")
+        await model.refresh()
+        XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+    }
+
+    func testReconnectAndScopeSaveClearCachedSuccessBeforeResponse() async throws {
+        for operation in ["connect", "scope"] {
+            let (model, fixture) = try makeModel(state: serviceState(status: "ready", scope: "all", syncState: "caught_up"))
+            await model.refresh()
+            XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+            try fixture.hold(operation)
+            if operation == "connect" { model.connectWhatsApp() }
+            else {
+                try fixture.write(serviceState(status: "ready", scope: "selected", chatIDs: ["team"], syncState: "syncing"), to: "scope-response.json")
+                model.selection.selectedIDs = ["team"]
+                model.saveScope(all: false)
+            }
+            XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
+            XCTAssertFalse(model.homeSubtitle.contains("Synced just now"))
+            try await waitUntil { fixture.exists("\(operation)-requested") }
+            await model.refresh()
+            XCTAssertFalse(model.homeSubtitle.contains("Synced just now"), "A poll during the operation cannot restore old success")
+            fixture.release(operation)
+            try await waitUntil { !model.busy }
+            XCTAssertFalse(model.homeSubtitle.contains("Synced just now"))
+        }
+    }
+
+    func testStateReadFailureClearsSuccessButCatalogFailureDoesNotInvalidateCompletion() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(status: "ready", scope: "all", syncState: "caught_up"))
+        await model.refresh()
+        XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+        fixture.remove("catalog.json")
+        model.editChats()
+        await model.refresh()
+        try await waitUntil { model.error != nil }
+        XCTAssertTrue(model.serviceAvailable)
+        XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+        fixture.remove("state.json")
+        await model.refresh()
+        XCTAssertFalse(model.serviceAvailable)
+        XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
+    }
+
+    func testWakeQueuedDuringScopeSaveStillRequiresFreshCompletion() async throws {
+        let caughtUp = serviceState(status: "ready", scope: "all", syncState: "caught_up")
+        let (model, fixture) = try makeModel(state: caughtUp)
+        await model.refresh()
+        try fixture.write(caughtUp, to: "scope-response.json")
+        try fixture.write(serviceState(status: "connecting", scope: "all", syncState: "unknown"), to: "wake-response.json")
+        try fixture.hold("scope")
+        try fixture.hold("wake")
+        model.saveScope(all: true)
+        try await waitUntil { fixture.exists("scope-requested") }
+        model.wake()
+        XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
+        fixture.release("scope")
+        try await waitUntil { fixture.exists("wake-requested") }
+        XCTAssertFalse(model.homeSubtitle.contains("Synced just now"))
+        fixture.release("wake")
+        try await waitUntil { !model.busy }
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
+    }
+
+    func testFailedMutationRefreshesStateAfterClearingBusy() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(status: "ready", scope: "all", syncState: "caught_up"))
+        await model.refresh()
+        try fixture.write(["error": "Synthetic scope save failed"], to: "scope-failure.json")
+        try fixture.write(serviceState(status: "ready", scope: "all", syncState: "syncing"), to: "state.json")
+        model.saveScope(all: false)
+        try await waitUntil { !model.busy && model.state.whatsapp.syncState == "syncing" }
+        XCTAssertEqual(model.error, "Synthetic scope save failed")
+    }
+
+    func testWakeQueuedDuringPairingStillRuns() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(status: "ready", scope: "all", syncState: "caught_up"))
+        await model.refresh()
+        model.page = .mcp
+        try fixture.write(["instructions": "Synthetic setup instructions", "expires_at": ISO8601DateFormatter().string(from: Date().addingTimeInterval(600)), "invitation_id": "synthetic"], to: "pairing-response.json")
+        try fixture.write(serviceState(status: "connecting", scope: "all", syncState: "unknown"), to: "wake-response.json")
+        try fixture.hold("pairing")
+        model.copyInstructions()
+        try await waitUntil { fixture.exists("pairing-requested") }
+        model.wake()
+        XCTAssertFalse(model.homeSubtitle.contains("Synced just now"))
+        fixture.release("pairing")
+        try await waitUntil { fixture.exists("wake-requested") && !model.busy }
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
+    }
+
     private func waitUntil(file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) async throws {
         for _ in 0..<500 {
             if condition() { return }
@@ -212,8 +341,10 @@ final class OnboardingFlowTests: XCTestCase {
         throw FixtureFailure.timedOut
     }
 
-    private func serviceState(linked: Bool = true, status: String = "syncing", scope: String = "initial", chatIDs: [String] = []) -> [String: Any] {
-        ["whatsapp": ["linked": linked, "status": status],
+    private func serviceState(linked: Bool = true, status: String = "syncing", scope: String = "initial", chatIDs: [String] = [], syncState: String? = nil) -> [String: Any] {
+        var whatsapp: [String: Any] = ["linked": linked, "status": status, "last_synced_at": "2026-10-01T12:00:00Z"]
+        if let syncState { whatsapp["sync_state"] = syncState }
+        return ["whatsapp": whatsapp,
          "scope": ["mode": scope, "chat_ids": chatIDs],
          "agents": [],
          "mcp": ["url": "http://127.0.0.1:32191/mcp", "status": scope == "initial" ? "setup_required" : "ready"]]
@@ -226,6 +357,10 @@ final class OnboardingFlowTests: XCTestCase {
         addTeardownBlock { @MainActor in
             fixture.release("scope")
             fixture.release("catalog")
+            fixture.release("state")
+            fixture.release("wake")
+            fixture.release("connect")
+            fixture.release("pairing")
             await model.stop()
             pasteboard.releaseGlobally()
             try? FileManager.default.removeItem(at: fixture.directory)
@@ -262,7 +397,12 @@ private struct ServiceFixture {
           esac
         done
         case "$method $request_path" in
-          'GET /state') /bin/cat "$fixture_dir/state.json" ;;
+          'GET /state')
+            /bin/cp "$fixture_dir/state.json" "$fixture_dir/state-read.json" || exit 1
+            /usr/bin/touch "$fixture_dir/state-requested"
+            while [ -e "$fixture_dir/state-hold" ]; do /bin/sleep 0.01; done
+            /bin/cat "$fixture_dir/state-read.json"
+            ;;
           'GET /catalog')
             /usr/bin/touch "$fixture_dir/catalog-requested"
             while [ -e "$fixture_dir/catalog-hold" ]; do /bin/sleep 0.01; done
@@ -270,8 +410,20 @@ private struct ServiceFixture {
             ;;
           'POST /whatsapp/connect')
             /usr/bin/touch "$fixture_dir/connect-requested"
+            while [ -e "$fixture_dir/connect-hold" ]; do /bin/sleep 0.01; done
             /bin/cp "$fixture_dir/connect-response.json" "$fixture_dir/state.json"
             /bin/cat "$fixture_dir/state.json"
+            ;;
+          'POST /lifecycle/wake')
+            /usr/bin/touch "$fixture_dir/wake-requested"
+            while [ -e "$fixture_dir/wake-hold" ]; do /bin/sleep 0.01; done
+            /bin/cp "$fixture_dir/wake-response.json" "$fixture_dir/state.json"
+            /bin/cat "$fixture_dir/state.json"
+            ;;
+          'POST /pairing')
+            /usr/bin/touch "$fixture_dir/pairing-requested"
+            while [ -e "$fixture_dir/pairing-hold" ]; do /bin/sleep 0.01; done
+            /bin/cat "$fixture_dir/pairing-response.json"
             ;;
           'PUT /scope')
             /bin/cat > "$fixture_dir/scope-request.json"
@@ -296,6 +448,7 @@ private struct ServiceFixture {
     func exists(_ name: String) -> Bool { FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path) }
     func hold(_ operation: String) throws { try Data().write(to: directory.appendingPathComponent("\(operation)-hold")) }
     func release(_ operation: String) { try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(operation)-hold")) }
+    func remove(_ name: String) { try? FileManager.default.removeItem(at: directory.appendingPathComponent(name)) }
     func scopeRequest() throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("scope-request.json"))) as? [String: Any])
     }
