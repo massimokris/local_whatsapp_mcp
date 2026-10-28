@@ -25,8 +25,10 @@ final class ConnectionFlowTests: XCTestCase {
         XCTAssertEqual(model.connectionCredentials?.accessToken, original.accessToken)
         XCTAssertEqual(model.agents.count, 1)
         model.finishConnectionSetup()
-        XCTAssertEqual(model.page, .mcp)
-        XCTAssertNil(model.connectionCredentials)
+        XCTAssertEqual(model.page, .home)
+        XCTAssertEqual(model.expandedAgentID, model.homeAgent?.id)
+        XCTAssertEqual(model.connectionCredentials?.id, original.id)
+        XCTAssertEqual(model.connectionCredentials?.accessToken, original.accessToken)
         model.beginPairing()
         model.toggleManualSetup()
         XCTAssertEqual(model.agents.count, 2)
@@ -62,14 +64,12 @@ final class ConnectionFlowTests: XCTestCase {
         let model = model(page: "mcp-agents")
         let agent = try XCTUnwrap(model.agents.first)
         model.toggleAgent(agent)
-        model.toggleCredentials(agent)
         XCTAssertEqual(model.connectionCredentials?.id, agent.id)
         XCTAssertEqual(model.agents.count, 2)
         model.toggleAgent(agent)
         XCTAssertNil(model.connectionCredentials)
         XCTAssertNil(model.expandedAgentID)
         model.toggleAgent(agent)
-        model.toggleCredentials(agent)
         model.page = .home
         XCTAssertNil(model.connectionCredentials)
         XCTAssertNil(model.expandedAgentID)
@@ -106,7 +106,7 @@ final class ConnectionFlowTests: XCTestCase {
         XCTAssertEqual(pasteboard.string(forType: .string), invitation.instructions)
     }
 
-    func testOnlyMatchingInvitationReturnsToConnectionList() async throws {
+    func testOnlyMatchingInvitationReturnsToHomeConnection() async throws {
         let model = model()
         defer { model.clearInvitation() }
         model.beginPairing()
@@ -118,7 +118,8 @@ final class ConnectionFlowTests: XCTestCase {
         XCTAssertNotNil(model.invitation)
         model.state.agents.append(.init(id: "paired", name: "Connection 1", client: "generic", pairingInvitationID: invitation.invitationID))
         model.reconcileConnections()
-        XCTAssertEqual(model.page, .mcp)
+        XCTAssertEqual(model.page, .home)
+        XCTAssertEqual(model.expandedAgentID, model.homeAgent?.id)
         XCTAssertNil(model.invitation)
     }
 
@@ -126,15 +127,14 @@ final class ConnectionFlowTests: XCTestCase {
         let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCPTests-\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }
         let model = AppModel(environment: ["LWMCP_DEMO": "1", "LWMCP_DEMO_PAGE": "mcp-agents"], pasteboard: pasteboard)
-        let agent = try XCTUnwrap(model.agents.first)
-        model.toggleAgent(agent)
-        model.toggleCredentials(agent)
+        model.page = .home
+        model.toggleLocalMCP()
         let credentials = try XCTUnwrap(model.connectionCredentials)
         model.copyCredentialsURL()
         XCTAssertEqual(pasteboard.string(forType: .string), credentials.url)
         model.copyAccessToken()
         XCTAssertEqual(pasteboard.string(forType: .string), credentials.accessToken)
-        model.toggleAgent(agent)
+        model.toggleLocalMCP()
         XCTAssertNil(model.connectionCredentials)
         XCTAssertEqual(pasteboard.string(forType: .string), credentials.accessToken)
     }

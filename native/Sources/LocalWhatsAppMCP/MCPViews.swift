@@ -3,20 +3,44 @@ import LocalWhatsAppCore
 
 struct LocalMCPCard: View {
     @ObservedObject var model: AppModel
+    @State private var agentToRemove: AgentConnection?
+    @State private var confirmRemoval = false
+
     var body: some View {
-        Button { model.page = .mcp } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "network").font(.system(size: 23)).foregroundStyle(Theme.secondary)
-                    .frame(width: 32, height: 32)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Local MCP").font(Theme.font(16, weight: .bold))
-                    Text(model.mcpSummary.statusText).font(Theme.font(11)).foregroundStyle(Theme.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+        let expanded = model.homeAgent.map { model.expandedAgentID == $0.id } ?? false
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { model.toggleLocalMCP() }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "network").font(.system(size: 23)).foregroundStyle(Theme.secondary)
+                        .frame(width: 32, height: 32).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Local MCP").font(Theme.font(16, weight: .bold))
+                        Text(model.mcpSummary.statusText).font(Theme.font(11)).foregroundStyle(Theme.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 6)
+                    Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0)).accessibilityHidden(true)
                 }
-                Spacer(minLength: 6)
-                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.secondary)
-            }.padding(12).modifier(RowCardSurface(emphasized: true))
-        }.buttonStyle(.plain).accessibilityLabel("Local MCP, \(model.mcpSummary.statusText). Manage agent connections.")
+                .padding(12).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("Local MCP, \(model.mcpSummary.statusText)")
+                .accessibilityValue(model.homeAgent == nil ? "Connect your agent" : (expanded ? "Details expanded" : "Details collapsed"))
+            if expanded, let agent = model.homeAgent {
+                Rectangle().fill(Theme.line).frame(height: 0.5).padding(.horizontal, 12)
+                MCPConnectionControls(model: model, agent: agent) {
+                    agentToRemove = agent
+                    confirmRemoval = true
+                }
+            }
+        }.modifier(RowCardSurface(emphasized: true))
+        .alert("Delete this connection?", isPresented: $confirmRemoval, presenting: agentToRemove) { agent in
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) { model.removeAgent(agent) }
+        } message: { agent in
+            Text("\(agent.name) will no longer be able to read or send messages.")
+        }
     }
 }
 
@@ -60,7 +84,6 @@ struct MCPConnectionsView: View {
 
     private func connectionCard(_ agent: AgentConnection) -> some View {
         let expanded = model.expandedAgentID == agent.id
-        let showingCredentials = model.credentialsConnectionID == agent.id
         return VStack(spacing: 0) {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) { model.toggleAgent(agent) }
@@ -85,44 +108,48 @@ struct MCPConnectionsView: View {
                 .accessibilityValue(expanded ? "Details expanded" : "Details collapsed")
             if expanded {
                 Rectangle().fill(Theme.line).frame(height: 0.5).padding(.horizontal, 12)
-                VStack(alignment: .leading, spacing: 0) {
-                    CardActionRow(title: "Delete connection", subtitle: "Remove agent’s access to WhatsApp") {
-                        Button("Delete") { agentToRemove = agent; confirmRemoval = true }
-                            .buttonStyle(DisconnectButtonStyle(width: Theme.cardActionButtonWidth()))
-                            .accessibilityLabel("Delete connection for \(agent.name)")
-                            .disabled(model.busy || !model.serviceAvailable)
-                    }
-                    CardActionRow(title: "Allow message sending", subtitle: "Let the agent send messages for you") {
-                        Toggle("Allow message sending", isOn: Binding(
-                            get: { agent.sendEnabled == true },
-                            set: { model.changeSending(agent, enabled: $0) }
-                        )).labelsHidden().toggleStyle(.switch).tint(Theme.green)
-                            .accessibilityLabel("Allow message sending for \(agent.name)")
-                            .disabled(model.busy || !model.serviceAvailable)
-                    }
-                    CardActionRow(title: "Credentials", subtitle: AgentConnectionSummary(agent: agent).lastUsedText) {
-                        Button(showingCredentials ? "Hide" : "Show") { model.toggleCredentials(agent) }
-                            .buttonStyle(QuietButtonStyle(width: Theme.cardActionButtonWidth()))
-                            .accessibilityLabel("\(showingCredentials ? "Hide" : "Show") credentials for \(agent.name)")
-                            .disabled(model.busy || (!model.serviceAvailable && !showingCredentials))
-                    }
-                    if showingCredentials {
-                        if model.loadingCredentials {
-                            ProgressView("Loading credentials…").font(Theme.font(12))
-                                .frame(maxWidth: .infinity).padding(.bottom, 14)
-                        } else if let credentials = model.connectionCredentials, credentials.id == agent.id {
-                            MCPCredentialsRows(
-                                credentials: credentials,
-                                urlCopied: model.credentialsURLCopied,
-                                tokenCopied: model.accessTokenCopied,
-                                copyURL: model.copyCredentialsURL,
-                                copyToken: model.copyAccessToken
-                            ).padding(.horizontal, 14).padding(.bottom, 14)
-                        }
-                    }
-                }
+                MCPConnectionControls(model: model, agent: agent) { agentToRemove = agent; confirmRemoval = true }
             }
         }.modifier(RowCardSurface(emphasized: true))
+    }
+}
+
+private struct MCPConnectionControls: View {
+    @ObservedObject var model: AppModel
+    let agent: AgentConnection
+    let delete: () -> Void
+
+    var body: some View {
+        let credentials = model.connectionCredentials.flatMap { $0.id == agent.id ? $0 : nil }
+        VStack(alignment: .leading, spacing: 0) {
+            credentialRow("URL", value: credentials?.url, copied: model.credentialsURLCopied, copy: model.copyCredentialsURL)
+            credentialRow("Token", value: credentials?.accessToken, copied: model.accessTokenCopied, copy: model.copyAccessToken)
+            CardActionRow(title: "Allow message sending", subtitle: "Let the agent send messages for you") {
+                Toggle("Allow message sending", isOn: Binding(
+                    get: { agent.sendEnabled == true },
+                    set: { model.changeSending(agent, enabled: $0) }
+                )).labelsHidden().toggleStyle(.switch).tint(Theme.green)
+                    .accessibilityLabel("Allow message sending for \(agent.name)")
+                    .disabled(model.busy || !model.serviceAvailable)
+            }
+            CardActionRow(title: "Delete connection", subtitle: "Remove agent’s access to WhatsApp") {
+                Button("Delete", action: delete)
+                    .buttonStyle(DisconnectButtonStyle(width: Theme.cardActionButtonWidth()))
+                    .accessibilityLabel("Delete connection for \(agent.name)")
+                    .disabled(model.busy || !model.serviceAvailable)
+            }
+        }
+    }
+
+    private func credentialRow(_ title: String, value: String?, copied: Bool, copy: @escaping () -> Void) -> some View {
+        let pending = model.credentialsConnectionID != agent.id || model.loadingCredentials
+        return CardActionRow(title: title, subtitle: value ?? (model.serviceAvailable && pending ? "Loading…" : "Unavailable")) {
+            Button(copied ? "Copied" : "Copy", action: copy)
+                .buttonStyle(QuietButtonStyle(width: Theme.cardActionButtonWidth()))
+                .accessibilityLabel(copied ? "\(title) copied" : "Copy \(title)")
+                .disabled(value == nil)
+                .opacity(value == nil ? 0.45 : 1)
+        }.lineLimit(1).truncationMode(.middle)
     }
 }
 

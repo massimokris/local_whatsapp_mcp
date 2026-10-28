@@ -94,10 +94,13 @@ struct PanelView: View {
     }
     private var home: some View {
         VStack(spacing: 0) {
-            sourceCard.padding(.top, 24)
-            LocalMCPCard(model: model).padding(.top, 12)
-            errorNotice.padding(.top, 14)
-            Spacer(minLength: 24)
+            ScrollView {
+                VStack(spacing: 12) {
+                    sourceCard
+                    LocalMCPCard(model: model)
+                    errorNotice
+                }.padding(.top, 24).padding(.bottom, 14)
+            }.scrollIndicators(.hidden)
             localNote.padding(.bottom, homeHasFooterActions ? 26 : 0)
             if homeHasFooterActions {
                 if model.whatsappNeedsReconnect {
@@ -132,6 +135,13 @@ struct PanelView: View {
                 .accessibilityValue(sourceExpanded ? "Details expanded" : "Details collapsed")
             if sourceExpanded {
                 Rectangle().fill(Theme.line).frame(height: 0.5).padding(.horizontal, 12)
+                if model.state.scope.isConfirmed && model.whatsappLinked &&
+                    !model.whatsappDisconnecting && !model.whatsappDisconnectPending {
+                    CardActionRow(title: "Choose connected chats", subtitle: model.connectedChatsSummary) {
+                        Button("Choose", action: model.editChats).buttonStyle(QuietButtonStyle(width: sourceActionButtonWidth)).disabled(model.busy)
+                            .accessibilityLabel("Choose connected chats")
+                    }
+                }
                 CardActionRow(
                     title: model.whatsappLinked ? "Stop syncing WhatsApp" : "Connect WhatsApp",
                     subtitle: model.whatsappLinked ? "Signs this Mac out of WhatsApp." : "Scan a QR code from your phone to link this Mac"
@@ -145,13 +155,6 @@ struct PanelView: View {
                         }.buttonStyle(DisconnectButtonStyle(width: sourceActionButtonWidth)).disabled(model.busy || model.whatsappDisconnecting)
                     } else {
                         Button("Connect", action: model.showConnection).buttonStyle(QuietButtonStyle()).disabled(model.busy)
-                    }
-                }
-                if model.state.scope.isConfirmed && model.whatsappLinked &&
-                    !model.whatsappDisconnecting && !model.whatsappDisconnectPending {
-                    CardActionRow(title: "Choose connected chats", subtitle: model.connectedChatsSummary) {
-                        Button("Choose", action: model.editChats).buttonStyle(QuietButtonStyle(width: sourceActionButtonWidth)).disabled(model.busy)
-                            .accessibilityLabel("Choose connected chats")
                     }
                 }
             }

@@ -23,6 +23,8 @@ Preview pages are `home`, `qr`, `qr-hover`, `initial`, `chats`, and `settings`; 
 
 `synced` and `syncing` preview the exact catch-up headers with 1,292 connected chats. `synced` has confirmed `sync_state: "caught_up"` and an older historical timestamp; `syncing` has pending work and a recent timestamp. Header success requires explicit current completion and healthy connection state. Missing or unfamiliar sync states, service read failures, reconnects, wake, and scope changes cannot retain a cached success indication.
 
+`home-mcp` previews the collapsed Local MCP card; `home-mcp-expanded` and its `home-mcp-credentials` alias preview expanded connection controls with synthetic credentials loaded automatically. The rows are URL, Token, Allow message sending, and Delete connection, in that order. URL and Token show their values beneath their labels with Copy buttons on the right. The WhatsApp card puts Choose connected chats before Stop syncing WhatsApp. This simplified surface manages the first connection in name/ID order. With no saved connection, it opens initial agent setup; completing setup returns to the expanded home card. The home cards scroll so expanded credentials remain reachable on shorter screens.
+
 ## Verification
 
 Demo screenshots do not establish actual WhatsApp linking, client configuration/reload, login-item approval, or sleep/wake compatibility; those require live installation checks.

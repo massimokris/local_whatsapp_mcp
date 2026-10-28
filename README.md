@@ -26,7 +26,7 @@ Click the menu bar icon to open the panel. Quit an existing copy before replacin
 
 Each screen opens automatically after the previous step. The pairing code expires after ten minutes. **Do it manually** lets you copy the MCP URL and access token into your client’s settings instead.
 
-Open **Local MCP** to add connections, view credentials or remove an agent’s access. Use **Choose** on the WhatsApp card to change the shared chat scope.
+Open **Local MCP** to copy the saved connection's URL or token, manage sending, or remove its access. Use **Choose** on the WhatsApp card to change the shared chat scope.
 
 ## Permissions and local access
 

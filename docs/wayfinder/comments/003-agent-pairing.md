@@ -69,3 +69,13 @@ With saved connections, **Local MCP** shows expandable home-style cards containi
 To support that disclosure, private `GET /agents/ID/credentials` now returns the existing stored credential for any active connection, including generic paired grants. It must not rotate a token, change permission, create a connection, expose another connection's token, or become a public HTTP/MCP route. Logs and ordinary state remain redacted. The generic exchange protocol, ten-minute one-use code, per-connection revocation, initially disabled sending, and local-only boundary are unchanged.
 
 The [component interfaces](../../implementation/interfaces.md#serviceprivate-control-boundary) define the private credential boundary. This records the user's design decision, not executed UI, backend, or packaging checks. Earlier resolutions remain as history.
+
+## Home connection controls — 2026-10-27
+
+The user requested that clicking **Local MCP** on the overview expand **Delete connection**, **Allow message sending**, and **Credentials** directly beneath that header. The user explicitly accepted hiding the connection list and additional-connection creation for the current interface. The simplified card uses the first saved connection in name/ID order; other grants retain their independent access and sending permissions.
+
+With no saved connection, Local MCP opens initial agent setup. Completing manual setup or redeeming the matching pairing invitation returns to the overview with the Local MCP card expanded. Collapse, navigation, panel close, deletion, or a change in the displayed connection clears disclosed credentials and invalidates pending responses. The overview cards scroll so controls remain reachable when both cards and credential rows are expanded. Current contracts and preview routes are recorded in the [component interfaces](../../implementation/interfaces.md) and [native guide](../../../native/README.md).
+
+### Direct credential rows — 2026-10-27
+
+The user subsequently replaced the Credentials Show/Hide item with URL and Token rows that display their values as subtitles and have Copy buttons. The Local MCP order is URL, Token, Allow message sending, then Delete connection. Expanding the connection loads the existing stored credentials automatically; collapse and navigation still clear them. In the WhatsApp card, Choose connected chats comes before Stop syncing WhatsApp. This supersedes the earlier control order and separate credential disclosure in the home-card decision above.

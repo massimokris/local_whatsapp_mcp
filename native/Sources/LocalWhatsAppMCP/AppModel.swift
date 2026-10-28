@@ -112,6 +112,7 @@ final class AppModel: ObservableObject {
         }
     }
     var canCreateConnection: Bool { mcpSummary.isReady && !busy && !stopping }
+    var homeAgent: AgentConnection? { agents.first }
     private var isConnectionPage: Bool { page == .mcp || page == .pairing }
     private var nextAgentName: String { AgentConnectionSummary.nextName(in: state.agents) }
     func panelOpened() {
@@ -144,7 +145,7 @@ final class AppModel: ObservableObject {
         refreshing = true
         let refreshRevision = stateRevision
         var receivedState = false
-        defer { refreshing = false }
+        defer { refreshing = false; ensureExpandedConnectionCredentials() }
         do {
             try await runtime.start()
             let data = try await runtime.control(method: "GET", path: "/state")
@@ -190,6 +191,11 @@ final class AppModel: ObservableObject {
             pairingNotice = "This connection has been deleted."
         }
         if let id = expandedAgentID, !activeIDs.contains(id) { expandedAgentID = nil }
+        if page == .home, let id = expandedAgentID, id != homeAgent?.id {
+            clearConnectionCredentials()
+            expandedAgentID = nil
+        }
+        ensureExpandedConnectionCredentials()
     }
     private func resolvePanelOpening(resumeInitialSetup: Bool = false) {
         let destination = whatsappDisconnecting && (pendingPanelOpen || page == .qr)
@@ -295,7 +301,9 @@ final class AppModel: ObservableObject {
         showingManualSetup = false
         setupManualConnectionID = nil
         pairingNotice = nil
-        page = .mcp
+        page = .home
+        expandedAgentID = homeAgent?.id
+        ensureExpandedConnectionCredentials()
     }
     func copyInstructions() {
         expireInvitation()
@@ -332,7 +340,7 @@ final class AppModel: ObservableObject {
         }
         busy = true
         Task {
-            defer { busy = false; resumeQueuedWake() }
+            defer { busy = false; resumeQueuedWake(); ensureExpandedConnectionCredentials() }
             do {
                 let body = try JSONSerialization.data(withJSONObject: ["name": name])
                 let data = try await runtime.control(method: "POST", path: "/pairing", body: body)
@@ -388,17 +396,21 @@ final class AppModel: ObservableObject {
         clearInvitation()
         loadCredentials(existingID: setupManualConnectionID)
     }
+    func toggleLocalMCP() {
+        if let agent = homeAgent { toggleAgent(agent) }
+        else { beginPairing() }
+    }
     func toggleAgent(_ agent: AgentConnection) {
         clearConnectionCredentials()
         expandedAgentID = expandedAgentID == agent.id ? nil : agent.id
+        ensureExpandedConnectionCredentials()
     }
-    func toggleCredentials(_ agent: AgentConnection) {
-        if credentialsConnectionID == agent.id {
-            clearConnectionCredentials()
-            return
-        }
-        guard !busy, serviceAvailable, !stopping else { return }
-        loadCredentials(existingID: agent.id)
+    private func ensureExpandedConnectionCredentials() {
+        guard !busy, !refreshing, !stopping, serviceAvailable,
+              let id = expandedAgentID, id != credentialsConnectionID,
+              state.agents.contains(where: { $0.id == id }),
+              credentialSurfaceIsVisible(for: id) else { return }
+        loadCredentials(existingID: id)
     }
     private func loadCredentials(existingID: String?) {
         guard !busy, !stopping, serviceAvailable,
@@ -429,6 +441,7 @@ final class AppModel: ObservableObject {
                 busy = false
                 if generation == credentialsGeneration { loadingCredentials = false }
                 resumeQueuedWake()
+                ensureExpandedConnectionCredentials()
             }
             do {
                 let payload = existingID == nil ? try JSONSerialization.data(withJSONObject: ["name": name]) : nil
@@ -446,13 +459,16 @@ final class AppModel: ObservableObject {
                     setupManualConnectionID = credentials.id
                 }
                 // A late response can update the grant list but cannot reopen credentials.
-                guard isConnectionPage, generation == credentialsGeneration else { return }
+                guard credentialSurfaceIsVisible(for: existingID), generation == credentialsGeneration else { return }
                 connectionCredentials = credentials
                 credentialsConnectionID = credentials.id
             } catch {
-                if isConnectionPage, generation == credentialsGeneration { self.error = error.localizedDescription }
+                if credentialSurfaceIsVisible(for: existingID), generation == credentialsGeneration { self.error = error.localizedDescription }
             }
         }
+    }
+    private func credentialSurfaceIsVisible(for id: String?) -> Bool {
+        isConnectionPage || (page == .home && id != nil && id == homeAgent?.id && id == expandedAgentID)
     }
     private func clearConnectionCredentials() {
         credentialsGeneration += 1
@@ -530,6 +546,7 @@ final class AppModel: ObservableObject {
                 busy = false
                 finished?()
                 resumeQueuedWake()
+                ensureExpandedConnectionCredentials()
                 if refreshAfterFailure { Task { await refresh() } }
             }
             do {
@@ -538,6 +555,7 @@ final class AppModel: ObservableObject {
                 let data = try await runtime.control(method: method, path: path, body: payload)
                 state = try JSONDecoder().decode(ServiceState.self, from: data)
                 serviceAvailable = true
+                reconcileConnections()
                 resolvePanelOpening()
                 completion?()
             } catch {
@@ -551,6 +569,11 @@ final class AppModel: ObservableObject {
         state = ServiceState(whatsapp: .init(status: "ready", linked: true, lastSyncedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120)), syncState: "caught_up"), scope: Scope(mode: "selected", chatIDs: ["work", "family"]), mcp: .init(url: "http://127.0.0.1:32191", status: "ready"))
         selection = ChatSelection(chats: [Chat(id: "work", name: "Product team", kind: "group", lastActivity: "2026-10-23T07:30:00Z"), Chat(id: "family", name: "Family", kind: "group", lastActivity: "2026-10-23T07:20:00Z"), Chat(id: "renee", name: "Renée Santos", phone: "+1 (415) 555-0123", kind: "direct"), Chat(id: "long", name: "Weekend hiking plans and the very ambitious autumn road trip", kind: "group"), Chat(id: "phone", phone: "+44 20 5550 0123", kind: "direct")] + (1...100).map { Chat(id: "project-\($0)", name: "Project \($0)", kind: "group") }, selectedIDs: ["work", "family"])
         switch page {
+        case "home-mcp", "home-mcp-expanded", "home-mcp-credentials":
+            var agent = AgentConnection(id: "demo-agent-1", name: "Connection 1", client: "generic", sendEnabled: true, connected: true)
+            agent.lastSeenAt = ISO8601DateFormatter().string(from: Date())
+            state.agents = [agent]
+            if page != "home-mcp" { toggleLocalMCP() }
         case "synced", "syncing":
             state.scope = Scope(mode: "all")
             selection.chats += (101...1287).map { Chat(id: "project-\($0)", name: "Project \($0)", kind: "group") }
@@ -564,7 +587,6 @@ final class AppModel: ObservableObject {
                 first.lastSeenAt = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120))
                 state.agents = [first, .init(id: "demo-agent-2", name: "Connection 2", client: "generic", sendEnabled: true)]
                 if page == "mcp-expanded" || page == "mcp-credentials" || page == "mcp-long" { expandedAgentID = first.id }
-                if page == "mcp-credentials" || page == "mcp-long" { toggleCredentials(first) }
             }
         case "mcp-icons":
             self.page = .mcp
@@ -597,5 +619,6 @@ final class AppModel: ObservableObject {
         case "error": state = ServiceState(); error = "The app could not access its saved files. Check permissions and free space, then retry."
         default: if let page, let target = Page(rawValue: page) { self.page = target }
         }
+        ensureExpandedConnectionCredentials()
     }
 }
