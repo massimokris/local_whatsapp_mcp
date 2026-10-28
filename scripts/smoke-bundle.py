@@ -5,6 +5,7 @@ Uses only a disposable project build directory; no Keychain access.
 Never connects WhatsApp or changes a real client config.
 """
 import http.client
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -56,12 +57,14 @@ def status(url, path, host=None):
         client.close()
 
 
-def direct_rpc(credentials, method, params, request_id):
+def direct_rpc(credentials, method, params, request_id, connect_url=None):
     parsed = urlparse(credentials['url'])
-    client = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=15)
+    upstream = urlparse(connect_url) if connect_url else parsed
+    client = http.client.HTTPConnection(upstream.hostname, upstream.port, timeout=15)
     try:
         client.request('POST', parsed.path, json.dumps({'jsonrpc': '2.0', 'id': request_id,
                         'method': method, 'params': params}), headers={
+                            'Host': parsed.netloc,
                             'Authorization': 'Bearer ' + credentials['access_token'],
                             'Content-Type': 'application/json',
                             'Accept': 'application/json, text/event-stream',
@@ -72,11 +75,12 @@ def direct_rpc(credentials, method, params, request_id):
         client.close()
 
 
-def exchange(url, body, method='POST', headers=None):
+def exchange(url, body, method='POST', headers=None, connect_url=None):
     parsed = urlparse(url)
-    client = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=15)
+    upstream = urlparse(connect_url) if connect_url else parsed
+    client = http.client.HTTPConnection(upstream.hostname, upstream.port, timeout=15)
     try:
-        request_headers = {'Content-Type': 'application/json'}
+        request_headers = {'Content-Type': 'application/json', 'Host': parsed.netloc}
         request_headers.update(headers or {})
         client.request(method, parsed.path, json.dumps(body), headers=request_headers)
         response = client.getresponse()
@@ -115,7 +119,7 @@ try:
     check(state['scope']['mode'] == 'initial' and state['mcp']['status'] == 'setup_required', 'initial capture keeps MCP unavailable')
     endpoint = state['mcp']['url']
     check(urlparse(endpoint).hostname == '127.0.0.1', 'MCP endpoint is restricted to loopback')
-    check('cloud' not in state, 'service state exposes only local connection settings')
+    check('cloud' not in state, 'service state keeps the local connection contract')
     check(status(endpoint, '/mcp') == 401, 'local MCP rejects unauthenticated requests')
     check(status(endpoint, '/state') == 404, 'private controls are absent from MCP listener')
     check(status(endpoint, '/mcp', 'untrusted.invalid') == 403, 'MCP listener rejects unrecognized hosts')
@@ -124,7 +128,7 @@ try:
                       '/oauth/authorize', '/oauth/consent', '/oauth/register', '/oauth/token']
     check(all(status(endpoint, path) == 404 for path in retired_routes), 'OAuth and external authorization routes are absent')
     control('POST', '/cloud/instructions', {'provider': 'ngrok', 'name': 'Retired cloud setup'}, succeeds=False)
-    check(True, 'external agent setup is unavailable')
+    check(True, 'retired provider-managed setup remains unavailable')
     control('POST', '/pairing', {'name': 'Disposable smoke'}, succeeds=False)
     control('POST', '/agents/manual', {'name': 'Disposable manual'}, succeeds=False)
     check(True, 'manual connection creation waits for confirmed scope')
@@ -252,6 +256,75 @@ try:
           'wake respects intentional disconnect without starting linking')
     retained = tool('read_messages', {'chat_id': '123@s.whatsapp.net', 'limit': 10}, 19)
     check(len(retained['messages']) == 3, 'authorized archived messages remain readable after disconnect')
+
+    # Simulate ngrok's forwarding hop: connect to the real bundled loopback
+    # listener with an allowed ngrok Host. No synthetic credentials or
+    # archive contents leave this machine.
+    public_base = 'https://bundle-smoke.ngrok-free.app'
+    public_host = urlparse(public_base).netloc
+    check(status(endpoint, '/mcp', public_host) == 401,
+          'ngrok wildcard host reaches authentication without tunnel configuration')
+    check(all(status(endpoint, path, public_host) == 404 for path in ['/state', '/network', '/network/ngrok', '/agents/manual']),
+          'private controls stay absent from an allowed ngrok host')
+    remote_invite = control('POST', '/pairing', {'name': 'Disposable remote smoke'})
+    check(endpoint + '/pairing/redeem' in remote_invite['instructions'],
+          'local pairing instructions stay independent of user-managed tunnels')
+    remote_exchange = public_base + '/pairing/redeem'
+    code, _, _ = exchange(remote_exchange, {'token': remote_invite['token']},
+                          headers={'Origin': 'https://untrusted.invalid'}, connect_url=endpoint)
+    check(code == 403, 'ngrok pairing rejects foreign origin before consuming its invitation')
+    code, remote, _ = exchange(remote_exchange, {'token': remote_invite['token']},
+                               headers={'Origin': public_base}, connect_url=endpoint)
+    check(code == 200 and remote['url'] == public_base + '/mcp' and remote['token_type'] == 'Bearer',
+          'ngrok pairing returns a usable public MCP URL and durable credential')
+    details = control('GET', '/agents/' + remote['id'] + '/credentials')
+    check(details['url'] == endpoint + '/mcp' and details['access_token'] == remote['access_token'],
+          'private credentials keep the local URL and the same durable bearer')
+    code, initialized_remote = direct_rpc(remote, 'initialize', {
+        'protocolVersion': '2025-11-25', 'capabilities': {},
+        'clientInfo': {'name': 'ngrok-bundle-smoke', 'version': '1'}}, 200, connect_url=endpoint)
+    check(code == 200 and initialized_remote.get('result', {}).get('serverInfo', {}).get('name') == 'LocalWhatsAppMCP',
+          'public-host bearer initializes the actual bundled MCP handler')
+    code, remote_messages = direct_rpc(remote, 'tools/call', {
+        'name': 'read_messages', 'arguments': {'chat_id': '123@s.whatsapp.net', 'limit': 10}}, 201, connect_url=endpoint)
+    remote_result = remote_messages.get('result', {})
+    check(code == 200 and not remote_result.get('isError', False)
+          and len(remote_result.get('structuredContent', {}).get('messages', [])) == 3
+          and 'secret fixture' not in json.dumps(remote_result),
+          'ngrok access retains the same selected-chat policy')
+    cached_bytes = b'synthetic cached attachment\n'
+    cached_file = data / 'store/smoke-media.txt'
+    cached_file.write_bytes(cached_bytes)
+    with sqlite3.connect(data / 'store/wacli.db') as archive:
+        archive.execute('UPDATE messages SET media_type=?, filename=?, mime_type=?, file_sha256=?, file_length=?, local_path=?, downloaded_at=? WHERE chat_jid=? AND msg_id=?',
+                        ('document', 'smoke-media.txt', 'text/plain', hashlib.sha256(cached_bytes).digest(),
+                         len(cached_bytes), str(cached_file), int(time.time()), '123@s.whatsapp.net', 'm1'))
+    code, remote_attachment = direct_rpc(remote, 'tools/call', {
+        'name': 'get_attachment', 'arguments': {'chat_id': '123@s.whatsapp.net', 'message_id': 'm1'}}, 202, connect_url=endpoint)
+    attachment_result = remote_attachment.get('result', {})
+    attachment_content = attachment_result.get('structuredContent', {})
+    check(code == 200 and not attachment_result.get('isError', False)
+          and attachment_content.get('url', '').startswith(public_base + '/attachments/'),
+          'ngrok attachment responses advertise the public download origin')
+    download = urlparse(attachment_content['url'])
+    client = http.client.HTTPConnection(urlparse(endpoint).hostname, urlparse(endpoint).port, timeout=10)
+    try:
+        client.request('GET', download.path, headers={'Host': download.netloc,
+                       'Authorization': 'Bearer ' + remote['access_token']})
+        response = client.getresponse()
+        check(response.status == 200 and response.read() == cached_bytes,
+              'authenticated ngrok attachment URLs serve only verified synthetic cached bytes')
+    finally:
+        client.close()
+    check(status(endpoint, download.path, public_host) == 401,
+          'ngrok attachment downloads still require the connection bearer')
+    local_remote = dict(remote, url=endpoint + '/mcp')
+    code, local_tunnel_grant = direct_rpc(local_remote, 'tools/list', {}, 203)
+    check(code == 200 and 'result' in local_tunnel_grant,
+          'a tunnel-paired bearer also works through the local endpoint')
+    control('DELETE', '/agents/' + remote['id'])
+    code, _ = direct_rpc(remote, 'tools/list', {}, 204, connect_url=endpoint)
+    check(code == 401, 'revocation immediately denies authenticated ngrok access')
     control('PUT', '/scope', {'mode': 'selected', 'chat_ids': []})
     removed = rpc(paired, 'tools/call', {'name': 'read_messages', 'arguments': {'chat_id': '123@s.whatsapp.net'}}, 17)
     old_checkpoint = rpc(paired, 'tools/call', {'name': 'get_updates', 'arguments': {'checkpoint': updates['next_checkpoint']}}, 18)

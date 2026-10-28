@@ -36,7 +36,7 @@ The conversation identities and display information used to find and select chat
 The retained message content and attachment references. It may contain content from earlier initial capture or a previous chat scope.
 
 **Agent connection**:
-An independently authorized local MCP client connection with its own identity, credential, and sending permission.
+An independently authorized MCP client connection with its own identity, credential, and sending permission.
 _Avoid_: WhatsApp connection
 
 **Pairing invitation**:
@@ -54,7 +54,7 @@ _Avoid_: Pairing code, WhatsApp session
 An agent connection's optional permission to send new text and attachments to selected conversations.
 
 **Local MCP service**:
-The app-owned MCP server reachable only through loopback on the same Mac. Its per-agent credentials remain distinct from WhatsApp linking and the user-owned app-control socket. External HTTP access and cloud tunnels are outside the current product scope.
+The app-owned MCP server running on the user's Mac. Authorized agents reach it locally or through a user-managed ngrok tunnel; its credentials remain distinct from WhatsApp linking.
 
 **Attachment reference**:
 The recorded information identifying media associated with a message before or after the file is downloaded.

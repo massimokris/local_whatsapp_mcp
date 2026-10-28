@@ -7,9 +7,11 @@ swift test --package-path native
 swift build -c release --package-path native
 ```
 
-A complete app bundle supplies `Contents/Helpers/localwhatsappmcp` and `Contents/Helpers/wacli`. The executable communicates with the private service through the bundled service/control executable, using the contract in [interfaces.md](../docs/implementation/interfaces.md). The service owns a loopback-only MCP endpoint; the UI exposes WhatsApp connection, chat selection, local MCP status, agent setup/management, and minimal settings. Running the bare executable without the bundled service and engine is only useful for the demo preview.
+A complete app bundle supplies `Contents/Helpers/localwhatsappmcp` and `Contents/Helpers/wacli`. The executable communicates with the private service through the bundled service/control executable, using the contract in [interfaces.md](../docs/implementation/interfaces.md). The service binds MCP to loopback and accepts supported ngrok hosts through its built-in allowlist; the UI exposes WhatsApp connection, chat selection, local MCP status, agent setup/management, and minimal settings. Running the bare executable without the bundled service and engine is only useful for the demo preview.
 
 Initial onboarding follows **Link WhatsApp → Choose chats → Connect your agent**.
+
+The app displays and copies local connection URLs. For a remote agent, the user supplies the current HTTPS ngrok base as described in [Connect through ngrok](../README.md#connect-through-ngrok). The native app does not discover, configure, or manage the tunnel.
 
 ## Safe UI preview
 

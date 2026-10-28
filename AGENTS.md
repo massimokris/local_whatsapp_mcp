@@ -4,7 +4,7 @@ Shared project instructions for coding agents.
 
 ## Overview
 
-LocalWhatsAppMCP connects WhatsApp to agents on the same Mac through **MCP**, using a native menu bar app. The app owns sync, storage, chat scope and access. Agents own reasoning, schedules and notifications.
+LocalWhatsAppMCP connects WhatsApp to agents through **MCP**, using a native menu bar app. Agents connect on the same Mac or through a user-managed ngrok tunnel. The app owns sync, storage, chat scope and access. Agents own reasoning, schedules and notifications.
 
 Setup follows **Link WhatsApp → Choose chats → Connect your agent**. Preserve that experience; raise a product question only when evidence requires a material change.
 
@@ -22,7 +22,7 @@ Setup follows **Link WhatsApp → Choose chats → Connect your agent**. Preserv
 ### Key architecture decisions
 
 - **Chat scope:** Keep initial capture, confirmed ingestion scope and MCP access distinct. Existing content on disk does not authorize access. Recheck scope, credential revocation and per-agent sending permission on every content/action path.
-- **Local access:** Bind MCP only to loopback. Public endpoints, tunnels and cloud OAuth are outside scope. Expose specific MCP operations rather than unrestricted CLI execution.
+- **Network access:** Bind MCP only to loopback. Accept the local listener and valid `*.ngrok-free.app` hosts/origins. Generate public response URLs only from validated ngrok hosts. The user manages the tunnel and supplies its URL; app-owned tunnel setup and cloud OAuth remain outside scope. Apply the same credentials and scope on both routes. Expose specific MCP operations rather than unrestricted CLI execution.
 - **Engine ownership:** Keep the wacli patch focused. Preserve its connection/store ownership and documented policy handoff.
 - **Agent pairing:** Copyable instructions contain a temporary, single-use code. The agent configures its own client; sending starts disabled.
 
@@ -48,7 +48,7 @@ Setup follows **Link WhatsApp → Choose chats → Connect your agent**. Preserv
 | Service integration or engine behavior | [Component interfaces](docs/implementation/interfaces.md) for ownership and contracts; [engine guide](vendor/wacli/README.md) for the upstream boundary. |
 | UI, copy or accessibility | [Native guide](native/README.md) for safe previews and the native views above for existing patterns. |
 | Ingestion or archive access | [Selective-storage research](docs/research/selective-storage.md) for insertion points and policy coverage. |
-| MCP authentication or agent setup | [Agent-pairing research](docs/research/agent-pairing.md) for client capabilities and setup decisions. |
+| MCP authentication, agent setup or ngrok | [Component interfaces](docs/implementation/interfaces.md#local-mcp-boundary) for current access and URL rules; [agent-pairing research](docs/research/agent-pairing.md) for historical client-capability evidence. |
 | Planning or ticket status | [Tracker operations](docs/agents/issue-tracker.md) and the relevant decision or implementation ticket. |
 
 ## Build and run

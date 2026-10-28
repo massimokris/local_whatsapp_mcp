@@ -79,3 +79,7 @@ With no saved connection, Local MCP opens initial agent setup. Completing manual
 ### Direct credential rows — 2026-10-27
 
 The user subsequently replaced the Credentials Show/Hide item with URL and Token rows that display their values as subtitles and have Copy buttons. The Local MCP order is URL, Token, Allow message sending, then Delete connection. Expanding the connection loads the existing stored credentials automatically; collapse and navigation still clear them. In the WhatsApp card, Choose connected chats comes before Stop syncing WhatsApp. This supersedes the earlier control order and separate credential disclosure in the home-card decision above.
+
+## Pairing through ngrok — 2026-10-27
+
+The [ngrok host allowance](001-product-contract.md#ngrok-host-allowance--2026-10-27) permits a remote agent to redeem its code through the user's HTTPS `*.ngrok-free.app` URL. The user substitutes that tunnel base in the local setup instructions. A successful exchange returns an HTTPS MCP URL for the validated ngrok Host; attachment responses follow the same rule. Private copied instructions and manual/saved credentials continue to use local URLs. The one-use code, expiry, revocation, scope and initially disabled sending remain the same on both routes. Unsupported hosts/origins are rejected before redemption. Tunnel configuration, discovery and provider management remain outside the app.

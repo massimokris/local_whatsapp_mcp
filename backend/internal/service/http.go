@@ -9,7 +9,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -161,10 +160,14 @@ func (s *Service) ControlHandler() http.Handler {
 					return
 				}
 			}
+			s.mu.Lock()
+			s.cancelGeneration()
+			s.mu.Unlock()
 			s.operations.Lock()
 			s.mu.Lock()
 			g, ok := s.cfg.Grants[id]
 			if !ok {
+				s.generation, s.cancelGeneration = context.WithCancel(context.Background())
 				s.mu.Unlock()
 				s.operations.Unlock()
 				http.NotFound(w, r)
@@ -182,6 +185,7 @@ func (s *Service) ControlHandler() http.Handler {
 			if err == nil {
 				s.cfg = candidate
 			}
+			s.generation, s.cancelGeneration = context.WithCancel(context.Background())
 			s.mu.Unlock()
 			s.operations.Unlock()
 			if err != nil {
@@ -222,6 +226,8 @@ func (s *Service) AuthHandler(next http.Handler) http.Handler {
 		defer cancel()
 		stop := context.AfterFunc(generation, cancel)
 		defer stop()
+		stopIO := interruptHTTPOnCancellation(ctx, w)
+		defer stopIO()
 		ctx = context.WithValue(ctx, authorizationKey{}, &requestAuthorization{})
 		// Some MCP protocol versions intentionally detach HTTP cancellation. Keep
 		// this operation's lifetime available to the actual tool handler as well.
@@ -236,17 +242,16 @@ func (s *Service) LocalHandler() http.Handler {
 	mux.HandleFunc("/pairing/redeem", s.pairingHTTP)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		local, _ := url.Parse(s.LocalURL())
-		if local != nil && local.Host != "" {
-			if r.Host != local.Host {
-				http.Error(w, "unrecognized host", 403)
-				return
-			}
-			if origin := r.Header.Get("Origin"); origin != "" && origin != s.LocalURL() {
-				http.Error(w, "unrecognized origin", 403)
-				return
-			}
+		base, allowed := s.requestBase(r.Host)
+		if !allowed {
+			http.Error(w, "unrecognized host", http.StatusForbidden)
+			return
 		}
+		if !s.requestOriginAllowed(r.Header.Get("Origin"), base) {
+			http.Error(w, "unrecognized origin", http.StatusForbidden)
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), requestBaseKey{}, base))
 		if len(r.Header.Get("Origin")) > 0 {
 			w.Header().Add("Vary", "Origin")
 		}
@@ -254,4 +259,26 @@ func (s *Service) LocalHandler() http.Handler {
 		r.Body = http.MaxBytesReader(w, r.Body, 28<<20)
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// Cancelling a tool context does not interrupt net/http's body reads or socket
+// writes. Expire both deadlines so access changes can stop a request
+// before awaiting the operation lock it holds.
+func interruptHTTPOnCancellation(ctx context.Context, w http.ResponseWriter) func() {
+	controller := http.NewResponseController(w)
+	completed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(completed)
+		now := time.Now()
+		_ = controller.SetReadDeadline(now)
+		_ = controller.SetWriteDeadline(now)
+	})
+	return func() {
+		if !stop() {
+			<-completed
+		}
+		// Normal requests stop the callback before their connection can be
+		// reused. An aborted request keeps expired deadlines: resetting them
+		// here could block net/http while it drains an unfinished body.
+	}
 }

@@ -245,7 +245,7 @@ func (s *Service) getAttachment(ctx context.Context, t AttachmentRequest) (any, 
 	a := attachment{File: name, Chat: t.ChatID, MIME: result.MIME}
 	b, _ := json.Marshal(a)
 	token := s.seal(cursor{Agent: AgentID(ctx), Revision: p.Revision, Query: "attachment", Upstream: string(b), Expires: time.Now().Add(time.Hour).Unix()})
-	out := map[string]any{"status": "available", "source": result.Source, "bytes": st.Size(), "mime_type": result.MIME, "url": s.LocalURL() + "/attachments/" + token, "authorization": "Use the same agent bearer authentication as MCP. URL expires after one hour and becomes invalid on a scope change."}
+	out := map[string]any{"status": "available", "source": result.Source, "bytes": st.Size(), "mime_type": result.MIME, "url": s.requestBaseURL(ctx) + "/attachments/" + token, "authorization": "Use the same agent bearer authentication as MCP. URL expires after one hour and becomes invalid on a scope change."}
 	if t.Offset < 0 || t.Offset > st.Size() {
 		return nil, errors.New("attachment offset is outside the file")
 	}

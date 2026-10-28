@@ -1,12 +1,12 @@
 # LocalWhatsAppMCP implementation
 
-- Status: original implementation complete; current scope revised to local-only MCP on 2026-10-23
+- Status: original implementation complete; local-only revision on 2026-10-23, ngrok request-host allowance on 2026-10-27
 - Integration branch: `codex/localwhatsappmcp-integration`
 - Tracker operations: [local Markdown tracker](../agents/issue-tracker.md)
 
 The user authorized end-to-end implementation, local commits, isolated implementation branches, verification, review, and installable packaging on 2026-10-23. This execution graph is separate from the earlier decision map. Resolve each task with dated evidence in `comments/`; close only after its deliverables are integrated and verified. Runtime checks requiring the user's WhatsApp QR scan or provider login need separate live verification.
 
-The graph and completion records below describe the original implementation. The subsequent [local-only revision](../wayfinder/comments/001-product-contract.md#local-only-revision--2026-10-23) removes cloud connection from the current product; its task remains closed as historical evidence. Current inter-component contracts are in [interfaces](interfaces.md).
+The graph and completion records below describe the original implementation. The subsequent [local-only revision](../wayfinder/comments/001-product-contract.md#local-only-revision--2026-10-23) removes app-owned cloud connection; its task remains closed as historical evidence. The [ngrok host allowance](../wayfinder/comments/001-product-contract.md#ngrok-host-allowance--2026-10-27) later permits requests through user-managed tunnels without restoring provider setup or OAuth. Current inter-component contracts are in [interfaces](interfaces.md).
 
 ## Original task graph
 

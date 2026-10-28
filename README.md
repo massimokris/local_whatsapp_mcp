@@ -1,6 +1,6 @@
 # LocalWhatsAppMCP
 
-A native macOS menu bar app that connects WhatsApp to AI agents running on your Mac through **MCP**. Choose which chats they can read and whether they can send messages. Your archive stays on your Mac.
+A native macOS menu bar app that connects WhatsApp to AI agents through **MCP**, locally or through your ngrok tunnel. Choose which chats they can read and whether they can send messages. Your archive stays on your Mac.
 
 Download it [here](https://github.com/massimokris/local_whatsapp_mcp/releases/download/v1/LocalWhatsAppMCP-1.0.0-arm64.dmg) for free.
 
@@ -28,13 +28,25 @@ Each screen opens automatically after the previous step. The pairing code expire
 
 Open **Local MCP** to copy the saved connection's URL or token, manage sending, or remove its access. Use **Choose** on the WhatsApp card to change the shared chat scope.
 
+## Connect through ngrok
+
+Start your configured ngrok agent while the app is running:
+
+```sh
+ngrok http 127.0.0.1:32191
+```
+
+For a remote agent, replace `http://127.0.0.1:32191` in the copied setup instructions with your current HTTPS `*.ngrok-free.app` URL. Keep the `/pairing/redeem` and `/mcp` paths. For manual setup, use that public URL plus `/mcp` with the token copied from **Local MCP**. The app keeps showing local connection details; successful HTTP pairing and attachment responses through ngrok return public URLs.
+
+Supported ngrok hosts are allowed automatically; there is no app-side tunnel configuration. You manage ngrok's installation, login, URL and running process. Keep the Mac awake with the app and ngrok running, and update your agent's address if the tunnel URL changes. The forwarding command follows ngrok's [HTTP CLI documentation](https://ngrok.com/docs/gateway/agent/cli#ngrok-http).
+
 ## Permissions and local access
 
 **Message sending** starts off for each connection. Expand its card under **Local MCP** and enable **Allow message sending** when you want that agent to send messages.
 
 **Start at Log In** is optional and available in settings. macOS may ask you to approve it.
 
-The MCP server starts automatically and accepts connections only from this Mac. Sync and agent access continue when you close the panel; **Quit** stops them. The Mac must be awake and the app running. WhatsApp determines how much history is available, and attachments download on demand.
+The MCP server starts automatically on this Mac and also accepts authenticated requests forwarded through supported ngrok hosts. Sync and agent access continue when you close the panel; **Quit** stops them. The Mac must be awake and the app running. WhatsApp determines how much history is available, and attachments download on demand.
 
 ## Architecture
 

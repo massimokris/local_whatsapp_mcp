@@ -57,7 +57,7 @@ func (s *Service) pairingHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"id":           grant["id"],
-		"url":          strings.TrimRight(grant["url"], "/") + "/mcp",
+		"url":          s.requestBaseURL(r.Context()) + "/mcp",
 		"access_token": grant["secret"],
 		"token_type":   "Bearer",
 	})

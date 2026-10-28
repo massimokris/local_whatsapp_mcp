@@ -26,3 +26,9 @@ Earlier cloud research, implementation resolutions, and build evidence are histo
 ## Current native UI scope — 2026-10-23
 
 The user subsequently directed the interface to focus on WhatsApp and defer agent setup and management until a replacement flow is defined. The dark screenshots supersede the earlier Dock styling. This narrows the native surfaces at this point in the history; local MCP, chat-scope enforcement, and existing agent credentials remain backend responsibilities. The helper pairing contract is retained without claiming that its former native setup screens remain available.
+
+## ngrok host allowance — 2026-10-27
+
+The user requested that the backend accept additional request hosts/origins, specifically valid `*.ngrok-free.app` addresses, so an existing user-managed tunnel can reach pairing and MCP. This narrows the earlier local-only restriction while retaining the loopback listener, private app control, existing bearer authentication, shared chat scope and per-connection sending permission.
+
+The user owns the tunnel and supplies its HTTPS URL to the remote agent. Copied instructions and saved/manual connection details remain local; the user replaces their local base for remote setup. HTTP pairing and attachment responses through an allowed ngrok Host generate HTTPS URLs for that validated host. The change adds no native settings, saved public URL, tunnel discovery, provider setup or OAuth. The [component interfaces](../../implementation/interfaces.md#local-mcp-boundary) define the host/origin rules. Earlier decisions remain historical evidence; this records accepted scope rather than live provider/client verification.
