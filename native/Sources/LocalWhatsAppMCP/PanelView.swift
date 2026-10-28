@@ -291,9 +291,9 @@ struct PanelView: View {
             }.scrollIndicators(.hidden)
             errorNotice.padding(.top, 10)
             localNote.padding(.vertical, 16)
-            primary("Save selection", symbol: nil) { model.saveScope(all: false) }.disabled(model.catalogPending)
-            Button("Continue with all chats") { model.saveScope(all: true) }
-                .buttonStyle(.plain).foregroundStyle(Theme.secondary).padding(.top, 13).disabled(model.busy)
+            primary("Continue with all chats", symbol: nil) { model.saveScope(all: true) }
+            Button("Save selection") { model.saveScope(all: false) }
+                .buttonStyle(.plain).foregroundStyle(Theme.secondary).padding(.top, 13).disabled(model.busy || model.catalogPending)
         }.onAppear { searchFocused = true }
     }
     private var settings: some View {
