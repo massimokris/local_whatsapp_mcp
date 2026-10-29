@@ -5,8 +5,8 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 [ "$(uname -s)" = Darwin ] || { printf 'Build requires macOS and Xcode command line tools.\n' >&2; exit 1; }
 architecture=${ARCH:-$(uname -m)}
 case "$architecture" in arm64) go_arch=arm64 ;; x86_64) go_arch=amd64 ;; *) printf 'Unsupported architecture: %s\n' "$architecture" >&2; exit 1 ;; esac
-version=${APP_VERSION:-1.0.0}
-build_number=${APP_BUILD:-1}
+version=${APP_VERSION:-1.1.0}
+build_number=${APP_BUILD:-2}
 for value in "$version" "$build_number"; do
   printf '%s\n' "$value" | grep -Eq '^[0-9]+(\.[0-9]+){0,2}$' || { printf 'APP_VERSION and APP_BUILD must contain one to three numeric version components.\n' >&2; exit 1; }
 done
