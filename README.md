@@ -2,7 +2,7 @@
 
 A native macOS menu bar app that connects WhatsApp to AI agents through **MCP**, locally or through your ngrok tunnel. Choose which chats they can read and whether they can send messages. Your archive stays on your Mac.
 
-Download it [here](https://github.com/massimokris/local_whatsapp_mcp/releases/download/v1.1.0/LocalWhatsAppMCP-1.1.0-arm64.dmg) for free.
+Download it [here](https://github.com/massimokris/local_whatsapp_mcp/releases/download/v1.1.1/LocalWhatsAppMCP-1.1.1-arm64.dmg) for free.
 
 ![Setup walkthrough: connect WhatsApp, continue with all chats, and copy instructions to connect your agent.](docs/images/setup.gif)
 
@@ -12,7 +12,7 @@ Download it [here](https://github.com/massimokris/local_whatsapp_mcp/releases/do
 
 Requires **macOS 13 or later** on **Apple silicon**. The release download is Developer ID signed and Apple notarized; local builds use ad-hoc signing by default.
 
-1. Download and open [LocalWhatsAppMCP-1.1.0-arm64.dmg](https://github.com/massimokris/local_whatsapp_mcp/releases/download/v1.1.0/LocalWhatsAppMCP-1.1.0-arm64.dmg).
+1. Download and open [LocalWhatsAppMCP-1.1.1-arm64.dmg](https://github.com/massimokris/local_whatsapp_mcp/releases/download/v1.1.1/LocalWhatsAppMCP-1.1.1-arm64.dmg).
 2. Drag **LocalWhatsAppMCP** into the **Applications** folder.
 3. Eject the disk image and open **LocalWhatsAppMCP** from Applications.
 
