@@ -30,3 +30,9 @@ See [interfaces.md](interfaces.md) before implementing inter-component calls. Im
 ## Completion
 
 All six execution tasks are closed. The [distribution resolution](comments/105-distribution.md#completed--2026-10-23) records the final source snapshot, installer checksums, passing checks, review repairs, worktree cleanup, and limits of account-bound verification.
+
+## Follow-up work
+
+[Keep isolated message gaps separate from sync failure](issues/107-sync-health.md) completed the user's earlier October 29, 2026 revision. Its [completion record](comments/107-sync-health.md) preserves the implementation, passing isolated verification, independent reviews and live-test limits as historical evidence.
+
+The user's later [upstream-sync decision](../wayfinder/comments/001-product-contract.md#upstream-owned-sync--2026-10-29) supersedes that design. [Remove custom synchronization tracking](issues/108-upstream-sync.md) is complete: the custom completion/recovery layer and its UI are removed, policy and connection ownership are retained, and normal synchronization relies on the pinned upstream engine and unmodified SDK. The [completion record](comments/108-upstream-sync.md#completed--2026-10-29) records the passing integrated tests, disposable bundle checks, independent Standards and Spec reviews, preservation checks and live-test limits.
