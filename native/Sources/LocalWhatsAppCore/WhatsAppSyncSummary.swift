@@ -21,6 +21,6 @@ public struct WhatsAppSyncSummary {
     public func text(at _: Date = Date()) -> String {
         let freshness = isCaughtUp ? "Synced just now" : "Syncing messages…"
         guard let connectedChatCount else { return freshness }
-        return "\(freshness) · \(connectedChatCount.formatted(.number.locale(Locale(identifier: "en_US")))) \(connectedChatCount == 1 ? "chat" : "chats") connected"
+        return "\(freshness) - \(connectedChatCount.formatted(.number.locale(Locale(identifier: "en_US")))) \(connectedChatCount == 1 ? "chat" : "chats") connected"
     }
 }

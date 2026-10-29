@@ -207,9 +207,9 @@ final class OnboardingFlowTests: XCTestCase {
         let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-SyncTests-\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }
         let model = AppModel(environment: ["LWMCP_DEMO": "1", "LWMCP_DEMO_PAGE": "synced"], pasteboard: pasteboard)
-        XCTAssertEqual(model.homeSubtitle, "Synced just now · 1,292 chats connected")
+        XCTAssertEqual(model.homeSubtitle, "Synced just now - 1,292 chats connected")
         model.state.whatsapp.syncState = "syncing"
-        XCTAssertEqual(model.homeSubtitle, "Syncing messages… · 1,292 chats connected")
+        XCTAssertEqual(model.homeSubtitle, "Syncing messages… - 1,292 chats connected")
         model.state.whatsapp.syncState = "caught_up"
         for (status, label) in [("connecting", "Reconnecting…"), ("attention", "Needs attention"), ("disconnected", "Connection paused")] {
             model.state.whatsapp.status = status
