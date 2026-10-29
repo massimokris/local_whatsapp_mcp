@@ -9,24 +9,28 @@ struct LocalMCPCard: View {
     var body: some View {
         let expanded = model.homeAgent.map { model.expandedAgentID == $0.id } ?? false
         VStack(spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) { model.toggleLocalMCP() }
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "network").font(.system(size: 23)).foregroundStyle(Theme.secondary)
-                        .frame(width: 32, height: 32).accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Local MCP").font(Theme.font(16, weight: .bold))
-                        Text(model.mcpSummary.statusText).font(Theme.font(11)).foregroundStyle(Theme.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                let subtitle = model.homeAgent.map { AgentConnectionSummary(agent: $0).text(at: context.date) }
+                    ?? "Create MCP server connection"
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { model.toggleLocalMCP() }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "network").font(.system(size: 23)).foregroundStyle(Theme.secondary)
+                            .frame(width: 32, height: 32).accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Local MCP").font(Theme.font(16, weight: .bold))
+                            Text(subtitle).font(Theme.font(11)).foregroundStyle(Theme.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 6)
+                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.secondary)
+                            .rotationEffect(.degrees(expanded ? 90 : 0)).accessibilityHidden(true)
                     }
-                    Spacer(minLength: 6)
-                    Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.secondary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0)).accessibilityHidden(true)
-                }
-                .padding(12).contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel("Local MCP, \(model.mcpSummary.statusText)")
-                .accessibilityValue(model.homeAgent == nil ? "Connect your agent" : (expanded ? "Details expanded" : "Details collapsed"))
+                    .padding(12).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("Local MCP, \(subtitle)")
+                    .accessibilityValue(model.homeAgent == nil ? "Connect your agent" : (expanded ? "Details expanded" : "Details collapsed"))
+            }
             if expanded, let agent = model.homeAgent {
                 Rectangle().fill(Theme.line).frame(height: 0.5).padding(.horizontal, 12)
                 MCPConnectionControls(model: model, agent: agent) {

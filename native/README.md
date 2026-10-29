@@ -27,6 +27,8 @@ Preview pages are `home`, `qr`, `qr-hover`, `initial`, `chats`, and `settings`; 
 
 `home-mcp` previews the collapsed Local MCP card; `home-mcp-expanded` and its `home-mcp-credentials` alias preview expanded connection controls with synthetic credentials loaded automatically. The rows are URL, Token, Allow message sending, and Delete connection, in that order. URL and Token show their values beneath their labels with Copy buttons on the right. The WhatsApp card puts Choose connected chats before Stop syncing WhatsApp. This simplified surface manages the first connection in name/ID order. With no saved connection, it opens initial agent setup; completing setup returns to the expanded home card. The home cards scroll so expanded credentials remain reachable on shorter screens.
 
+The Local MCP card subtitle shows that connection's last request age and message-sending permission, such as `Last request 2m ago - Message sending on`. A saved connection without request activity shows `No request yet` followed by its actual sending permission. Relative ages refresh every minute. With no saved connection, the subtitle is `Create MCP server connection`.
+
 ## Verification
 
 Demo screenshots do not establish actual WhatsApp linking, client configuration/reload, login-item approval, or sleep/wake compatibility; those require live installation checks.
