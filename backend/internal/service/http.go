@@ -160,16 +160,13 @@ func (s *Service) ControlHandler() http.Handler {
 					return
 				}
 			}
-			s.mu.Lock()
-			s.cancelGeneration()
-			s.mu.Unlock()
-			s.operations.Lock()
+			finish, _ := s.operations.change(nil)
+			defer finish()
 			s.mu.Lock()
 			g, ok := s.cfg.Grants[id]
-			if !ok {
-				s.generation, s.cancelGeneration = context.WithCancel(context.Background())
+			if !ok || s.closed {
 				s.mu.Unlock()
-				s.operations.Unlock()
+				finish()
 				http.NotFound(w, r)
 				return
 			}
@@ -185,9 +182,8 @@ func (s *Service) ControlHandler() http.Handler {
 			if err == nil {
 				s.cfg = candidate
 			}
-			s.generation, s.cancelGeneration = context.WithCancel(context.Background())
 			s.mu.Unlock()
-			s.operations.Unlock()
+			finish()
 			if err != nil {
 				apiError(w, err)
 				return
@@ -217,11 +213,8 @@ func (s *Service) AuthHandler(next http.Handler) http.Handler {
 			apiError(w, err)
 			return
 		}
-		s.operations.RLock()
-		defer s.operations.RUnlock()
-		s.mu.Lock()
-		generation := s.generation
-		s.mu.Unlock()
+		generation, finish := s.operations.read()
+		defer finish()
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 		stop := context.AfterFunc(generation, cancel)

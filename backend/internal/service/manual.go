@@ -30,7 +30,7 @@ func (s *Service) createManualConnection(name string) (connectionCredentials, er
 	if s.cfg.Scope.Mode == "initial" {
 		return connectionCredentials{}, ErrSetup
 	}
-	if s.cfg.Transition {
+	if s.scopeTransitionLocked() {
 		return connectionCredentials{}, ErrTransition
 	}
 	name = strings.TrimSpace(name)

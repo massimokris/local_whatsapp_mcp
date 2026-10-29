@@ -50,6 +50,7 @@ type config struct {
 	Invites                  map[string]invitation `json:"invitations"`
 	Sends                    map[string]sendRecord `json:"sends"`
 
+	// Linked stores the user's sync intent, never proof of current authentication.
 	Linked               bool `json:"linked"`
 	Transition           bool `json:"transition"`
 	WhatsAppDisconnected bool `json:"whatsapp_disconnected,omitempty"`
@@ -62,17 +63,17 @@ type Options struct {
 	LocalURL  string
 }
 type Service struct {
-	cursorKey        []byte
-	mu               sync.Mutex
-	operations       sync.RWMutex
-	cfg              config
-	opt              Options
-	lastError        string
-	generation       context.Context
-	cancelGeneration context.CancelFunc
-	closed           bool
-	disconnecting    bool
-	resuming         bool
+	cursorKey      []byte
+	mu             sync.Mutex
+	operations     *operationLifetime
+	cfg            config
+	opt            Options
+	lastError      string
+	closed         bool
+	disconnecting  bool
+	resuming       bool
+	startupPending bool
+	queuedScopes   int
 }
 
 var ErrUnauthorized = errors.New("agent is not authorized")
@@ -99,8 +100,7 @@ func New(opt Options) (*Service, error) {
 	if err := os.Chmod(opt.DataDir, 0700); err != nil {
 		return nil, err
 	}
-	s := &Service{opt: opt}
-	s.generation, s.cancelGeneration = context.WithCancel(context.Background())
+	s := &Service{opt: opt, operations: newOperationLifetime()}
 	b, err := os.ReadFile(filepath.Join(opt.DataDir, "settings.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		for _, p := range []string{"content-policy.json", "store/session.db", "store/wacli.db", "credentials.db"} {
@@ -139,6 +139,7 @@ func New(opt Options) (*Service, error) {
 		if err := opt.Engine.RestoreSession(ctx); err != nil {
 			return nil, err
 		}
+		s.startupPending = opt.Engine.Status().Linked
 	}
 	return s, nil
 }
@@ -190,7 +191,7 @@ func (s *Service) State() map[string]any {
 	scope := s.cfg.Scope
 	err := s.lastError
 	url := s.opt.LocalURL
-	transition := s.cfg.Transition
+	transition := s.scopeTransitionLocked()
 	resuming, closed := s.resuming, s.closed
 	disconnected, pending, disconnecting := s.cfg.WhatsAppDisconnected, s.cfg.DisconnectPending, s.disconnecting
 	s.mu.Unlock()
@@ -243,9 +244,35 @@ func (s *Service) State() map[string]any {
 	}
 	return r
 }
+// ResumeSavedSession consumes startup's saved sync intent once. A lifecycle
+// action received after New supersedes it, even if startup has not run yet.
+func (s *Service) ResumeSavedSession(ctx context.Context) error {
+	finish, needed := s.operations.change(func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		pending := s.startupPending
+		s.startupPending = false
+		return pending
+	})
+	if !needed {
+		return nil
+	}
+	defer finish()
+	return s.resume(ctx, false)
+}
+
 func (s *Service) Resume(ctx context.Context, link bool) error {
-	s.operations.Lock()
-	defer s.operations.Unlock()
+	s.mu.Lock()
+	s.startupPending = false
+	s.mu.Unlock()
+	finish, _ := s.operations.change(nil)
+	defer finish()
+	return s.resume(ctx, link)
+}
+
+// resume requires the operations lock. Explicit Connect allows QR; automatic
+// resumes must verify the saved session after stopping the previous writer.
+func (s *Service) resume(ctx context.Context, link bool) error {
 	s.mu.Lock()
 	p := s.cfg.Scope
 	if s.closed {
@@ -277,38 +304,55 @@ func (s *Service) Resume(ctx context.Context, link bool) error {
 		return err
 	}
 	s.cfg = candidate
-	linked := s.cfg.Linked && !s.cfg.WhatsAppDisconnected
+	syncRequested := s.cfg.Linked && !s.cfg.WhatsAppDisconnected
 	s.mu.Unlock()
-	if !linked || s.opt.Engine == nil {
+	if !syncRequested || s.opt.Engine == nil {
 		return nil
 	}
 	if err := s.opt.Engine.Stop(ctx); err != nil {
 		return s.fail(err)
 	}
-	if err := s.opt.Engine.Start(ctx, p, link || p.Mode == "initial"); err != nil {
+	var err error
+	if link {
+		err = s.opt.Engine.Start(ctx, p, true)
+	} else {
+		err = s.startSavedSession(ctx, p)
+	}
+	if err != nil {
 		return s.fail(err)
 	}
 	s.mu.Lock()
 	s.cfg.Transition = false
 	s.lastError = ""
-	s.generation, s.cancelGeneration = context.WithCancel(context.Background())
-	err := s.saveLocked()
+	err = s.saveLocked()
 	s.mu.Unlock()
 	return err
+}
+
+// startSavedSession runs only after the old writer has stopped. Its cached
+// status can miss a logout while stopping, so reread the upstream session before
+// an automatic restart. Only an explicit Connect may request QR authentication.
+func (s *Service) startSavedSession(ctx context.Context, p engine.Policy) error {
+	if err := s.opt.Engine.RestoreSession(ctx); err != nil {
+		return err
+	}
+	if !s.opt.Engine.Status().Linked {
+		return nil
+	}
+	return s.opt.Engine.Start(ctx, p, false)
 }
 
 func (s *Service) Disconnect(ctx context.Context) error {
 	// Cancel in-flight MCP work before waiting for its operation lock. No command
 	// can overlap logout or restart the writer behind the user's disconnect.
 	s.mu.Lock()
-	s.cancelGeneration()
+	s.startupPending = false
 	s.mu.Unlock()
-	s.operations.Lock()
-	defer s.operations.Unlock()
+	finish, _ := s.operations.change(nil)
+	defer finish()
 	defer func() {
 		s.mu.Lock()
 		s.disconnecting = false
-		s.generation, s.cancelGeneration = context.WithCancel(context.Background())
 		s.mu.Unlock()
 	}()
 	s.mu.Lock()
@@ -380,10 +424,10 @@ func (s *Service) Close() error {
 		return nil
 	}
 	s.closed = true
-	s.cancelGeneration()
+	s.startupPending = false
 	s.mu.Unlock()
-	s.operations.Lock()
-	defer s.operations.Unlock()
+	finish := s.operations.stop()
+	defer finish()
 	var err error
 	if s.opt.Engine != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -404,6 +448,14 @@ func validChat(id string) bool {
 	}
 	return parts[1] == "s.whatsapp.net" || parts[1] == "g.us" || parts[1] == "lid"
 }
+
+// Queued scope requests invalidate access immediately, but only the request
+// holding exclusive operation ownership may change the durable transition.
+// An earlier operation's completion cannot clear a later request's barrier.
+func (s *Service) scopeTransitionLocked() bool {
+	return s.cfg.Transition || s.queuedScopes > 0
+}
+
 func (s *Service) applyScope(ctx context.Context, p engine.Policy) error {
 	if !validMode(p.Mode, false) {
 		return errors.New("scope mode must be all or selected")
@@ -422,12 +474,27 @@ func (s *Service) applyScope(ctx context.Context, p engine.Policy) error {
 	p.ChatIDs = ids
 	p.Version = 1
 	s.mu.Lock()
-	s.cancelGeneration()
-	s.cfg.Transition = true
+	if s.closed {
+		s.mu.Unlock()
+		return ErrUnauthorized
+	}
+	s.startupPending = false
+	s.queuedScopes++
 	s.mu.Unlock()
-	s.operations.Lock()
-	defer s.operations.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.queuedScopes--
+		s.mu.Unlock()
+	}()
+	finish, _ := s.operations.change(nil)
+	defer finish()
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrUnauthorized
+	}
+	// This scope now owns the serialized change and its durable barrier.
+	s.cfg.Transition = true
 	p.Revision = s.cfg.Scope.Revision + 1
 	s.cfg.Scope = p
 	err := s.saveLocked()
@@ -444,17 +511,16 @@ func (s *Service) applyScope(ctx context.Context, p engine.Policy) error {
 		return s.fail(err)
 	}
 	s.mu.Lock()
-	linked := s.cfg.Linked && !s.cfg.WhatsAppDisconnected
+	syncRequested := s.cfg.Linked && !s.cfg.WhatsAppDisconnected
 	s.mu.Unlock()
-	if linked && s.opt.Engine != nil {
-		if err = s.opt.Engine.Start(ctx, p, false); err != nil {
+	if syncRequested && s.opt.Engine != nil {
+		if err = s.startSavedSession(ctx, p); err != nil {
 			return s.fail(err)
 		}
 	}
 	s.mu.Lock()
 	s.cfg.Transition = false
 	s.lastError = ""
-	s.generation, s.cancelGeneration = context.WithCancel(context.Background())
 	err = s.saveLocked()
 	s.mu.Unlock()
 	return err
@@ -468,7 +534,7 @@ func (s *Service) invite(name string) (map[string]any, error) {
 	if s.cfg.Scope.Mode == "initial" {
 		return nil, ErrSetup
 	}
-	if s.cfg.Transition {
+	if s.scopeTransitionLocked() {
 		return nil, ErrTransition
 	}
 	name = strings.TrimSpace(name)
@@ -519,7 +585,7 @@ func (s *Service) redeem(token string) (map[string]string, error) {
 	if s.cfg.Scope.Mode == "initial" {
 		return nil, ErrSetup
 	}
-	if s.cfg.Transition {
+	if s.scopeTransitionLocked() {
 		return nil, ErrTransition
 	}
 	// Store the bearer before publishing its grant. A crash can leave an unused

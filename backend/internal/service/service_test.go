@@ -132,7 +132,9 @@ func (e *fixtureEngine) RestoreSession(context.Context) error             { retu
 func (e *fixtureEngine) Start(context.Context, engine.Policy, bool) error { return nil }
 func (e *fixtureEngine) Stop(context.Context) error                       { return nil }
 func (e *fixtureEngine) Logout(context.Context) error                     { return nil }
-func (e *fixtureEngine) Status() engine.Status                            { return engine.Status{Status: "ready"} }
+func (e *fixtureEngine) Status() engine.Status {
+	return engine.Status{Status: "ready", Linked: true}
+}
 func (e *fixtureEngine) Catalog(context.Context) ([]engine.Chat, error) {
 	return []engine.Chat{{ID: "123@s.whatsapp.net", Name: "Work"}, {ID: "999@s.whatsapp.net", Name: "Family"}}, nil
 }

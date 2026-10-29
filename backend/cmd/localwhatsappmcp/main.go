@@ -144,7 +144,7 @@ func serve(parent context.Context, options service.Options, binary, address stri
 	failures := make(chan error, 2)
 	go func() { failures <- local.Serve(tcp) }()
 	go func() { failures <- private.Serve(unix) }()
-	go func() { _ = s.Resume(ctx, false) }()
+	go func() { _ = s.ResumeSavedSession(ctx) }()
 	select {
 	case <-ctx.Done():
 	case err = <-failures:

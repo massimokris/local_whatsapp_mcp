@@ -104,7 +104,7 @@ func (s *Service) access(ctx context.Context, send bool) (engine.Policy, error) 
 	if s.cfg.Scope.Mode == "initial" {
 		return engine.Policy{}, ErrSetup
 	}
-	if s.cfg.Transition {
+	if s.scopeTransitionLocked() {
 		return engine.Policy{}, ErrTransition
 	}
 	if send && !g.SendEnabled {

@@ -199,7 +199,7 @@ func TestNgrokAttachmentLinksAndAuthorization(t *testing.T) {
 	}
 }
 
-// Signal the actual body-read seam while MCP holds operations.RLock.
+// Signal the actual body-read seam while MCP owns its request lifetime.
 type observedNetworkBody struct {
 	io.ReadCloser
 	once    sync.Once
