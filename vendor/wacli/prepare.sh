@@ -17,5 +17,4 @@ git -C "$source_dir" checkout --quiet --detach --force "$revision"
 git -C "$source_dir" clean -ffd --quiet
 git -C "$source_dir" apply --check "$vendor_dir/content-policy.patch"
 git -C "$source_dir" apply "$vendor_dir/content-policy.patch"
-"$vendor_dir/prepare-whatsmeow.sh" "$source_dir"
 printf '%s\n' "$source_dir"

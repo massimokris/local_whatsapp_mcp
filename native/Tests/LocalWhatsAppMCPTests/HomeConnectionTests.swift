@@ -211,7 +211,7 @@ private struct HomeCredentialsFixture {
         let helper = directory.appendingPathComponent("helper")
         runtime = HelperRuntime(helper: helper, wacli: helper, dataDirectory: directory)
         let state: [String: Any] = [
-            "whatsapp": ["linked": true, "status": "ready", "sync_state": "caught_up"],
+            "whatsapp": ["linked": true, "status": "ready"],
             "scope": ["mode": "selected", "chat_ids": ["team"]],
             "agents": [["id": "first", "name": "Connection 1", "send_enabled": false], ["id": "other", "name": "Connection 2", "send_enabled": true]],
             "mcp": ["url": "http://127.0.0.1:32191/mcp", "status": "ready"]

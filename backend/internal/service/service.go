@@ -192,44 +192,27 @@ func (s *Service) State() map[string]any {
 	err := s.lastError
 	url := s.opt.LocalURL
 	transition := s.scopeTransitionLocked()
-	resuming, closed := s.resuming, s.closed
+	resuming := s.resuming
 	disconnected, pending, disconnecting := s.cfg.WhatsAppDisconnected, s.cfg.DisconnectPending, s.disconnecting
 	s.mu.Unlock()
-	status := engine.Status{SyncState: engine.SyncUnknown, Status: "disconnected", Detail: "Connect WhatsApp to import available history."}
+	status := engine.Status{Status: "disconnected", Detail: "Connect WhatsApp to import available history."}
 	if s.opt.Engine != nil {
 		status = s.opt.Engine.Status()
 	}
 	if disconnected {
-		syncState := engine.SyncUnknown
-		if status.SyncState == engine.SyncError {
-			syncState = engine.SyncError
-		}
-		status = engine.Status{SyncState: syncState, Status: "disconnected", Detail: "WhatsApp is disconnected. Your archive stays on this Mac."}
+		status = engine.Status{Status: "disconnected", Detail: "WhatsApp is disconnected. Your archive stays on this Mac."}
 		if pending {
 			// A failed or interrupted logout must still offer Disconnect on reopen.
-			status = engine.Status{SyncState: syncState, Status: "attention", Linked: true, DisconnectPending: true, Detail: "WhatsApp sign-out is unfinished. Retry Disconnect."}
+			status = engine.Status{Status: "attention", Linked: true, DisconnectPending: true, Detail: "WhatsApp sign-out is unfinished. Retry Disconnect."}
 		}
 		if disconnecting {
 			status.Status = "disconnecting"
 			status.Detail = "Signing out of this WhatsApp linked device."
 		}
 	}
-	status.SyncState = engine.NormalizeSyncState(status.SyncState)
-	if closed || transition || resuming || err != "" {
-		if status.SyncState != engine.SyncError {
-			status.SyncState = engine.SyncUnknown
-		}
-	}
 	if transition || resuming {
 		status.Status = "connecting"
 		status.Detail = "Reconnecting to WhatsApp and applying chat scope."
-	}
-	if status.SyncState == engine.SyncCaughtUp {
-		switch status.Status {
-		case "ready", "connected", "syncing", "importing", "receiving_history":
-		default:
-			status.SyncState = engine.SyncUnknown
-		}
 	}
 	mcpStatus := "ready"
 	if scope.Mode == "initial" {
@@ -244,6 +227,7 @@ func (s *Service) State() map[string]any {
 	}
 	return r
 }
+
 // ResumeSavedSession consumes startup's saved sync intent once. A lifecycle
 // action received after New supersedes it, even if startup has not run yet.
 func (s *Service) ResumeSavedSession(ctx context.Context) error {

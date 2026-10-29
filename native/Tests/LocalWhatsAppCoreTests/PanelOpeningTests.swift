@@ -20,8 +20,8 @@ final class PanelOpeningTests: XCTestCase {
         for status in ["connected", "syncing", "attention", "failed", "disconnected", "connecting"] {
             XCTAssertEqual(WhatsAppPanelOpening(state: .init(status: status, linked: true)), .keepCurrentPage)
         }
-        // Older/partial state responses can still prove a live link.
-        XCTAssertEqual(WhatsAppPanelOpening(state: .init(status: "receiving_history")), .keepCurrentPage)
+        // An actual connected status still proves a live link in partial responses.
+        XCTAssertEqual(WhatsAppPanelOpening(state: .init(status: "ready")), .keepCurrentPage)
     }
 
     func testFirstSuccessfulLinkAutomaticallyLeavesQRCodeForHome() {

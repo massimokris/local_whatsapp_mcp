@@ -81,10 +81,8 @@ final class AppModel: ObservableObject {
     var statusLabel: String {
         if whatsappDisconnecting { return "Disconnecting…" }
         if !serviceAvailable && whatsappLinked { return "Reconnecting…" }
-        if state.whatsapp.syncState == "error" && whatsappConnected { return "Needs attention" }
+        if whatsappConnected { return "Connected to this Mac" }
         switch state.whatsapp.status {
-        case "ready", "connected": return "Connected to this Mac"
-        case "syncing", "importing", "receiving_history": return "Syncing messages…"
         case "linking": return "Waiting for your phone"
         case "connecting": return whatsappLinked ? "Reconnecting…" : "Connecting…"
         case "disconnecting": return "Disconnecting…"
@@ -93,16 +91,18 @@ final class AppModel: ObservableObject {
         }
     }
     var homeSubtitle: String {
-        guard serviceAvailable, whatsappConnected, state.whatsapp.syncState != "error", !whatsappDisconnecting, !whatsappDisconnectPending else { return statusLabel }
-        return syncSummary.text()
+        guard serviceAvailable, whatsappConnected, !whatsappDisconnecting, !whatsappDisconnectPending else { return statusLabel }
+        guard connectedChatCount != nil else { return "Connected to this Mac" }
+        return "Connected to this Mac - \(connectedChatsSummary)"
     }
     var connectedChatsSummary: String {
-        guard let count = syncSummary.connectedChatCount else { return "Loading connected chats…" }
+        guard let count = connectedChatCount else { return "Loading connected chats…" }
         return "\(count.formatted(.number.locale(Locale(identifier: "en_US")))) \(count == 1 ? "chat" : "chats") connected"
     }
-    private var syncSummary: WhatsAppSyncSummary {
-        let catalog = isDemo || lastCatalogRefresh != .distantPast ? selection.chats : nil
-        return WhatsAppSyncSummary(whatsapp: state.whatsapp, scope: state.scope, catalog: catalog)
+    private var connectedChatCount: Int? {
+        guard (isDemo || lastCatalogRefresh != .distantPast), state.scope.isConfirmed else { return nil }
+        let saved = ChatSelection(chats: selection.chats, selectedIDs: Set(state.scope.chatIDs))
+        return state.scope.mode == "all" ? saved.results.count : saved.selectedIDs.count
     }
     var mcpSummary: MCPConnectionSummary { .init(state: state, serviceAvailable: serviceAvailable) }
     var agents: [AgentConnection] {
@@ -170,7 +170,6 @@ final class AppModel: ObservableObject {
         } catch {
             if refreshRevision == stateRevision && !receivedState {
                 serviceAvailable = false
-                state.whatsapp.syncState = "unknown"
             }
             if !busy && refreshRevision == stateRevision { self.error = "Connecting to WhatsApp. \(error.localizedDescription)" }
         }
@@ -273,7 +272,6 @@ final class AppModel: ObservableObject {
         guard !isDemo, !stopping else { return }
         if busy {
             stateRevision += 1
-            state.whatsapp.syncState = "unknown"
             wakeRequested = true
             return
         }
@@ -533,10 +531,7 @@ final class AppModel: ObservableObject {
         guard !busy else { return }
         // Polls that predate this action or its result cannot restore old state.
         stateRevision += 1
-        if ["/whatsapp/connect", "/whatsapp/disconnect", "/lifecycle/wake", "/scope"].contains(path) {
-            state.whatsapp.syncState = "unknown"
-            if path == "/whatsapp/connect" || path == "/lifecycle/wake" { state.whatsapp.status = "connecting" }
-        }
+        if path == "/whatsapp/connect" || path == "/lifecycle/wake" { state.whatsapp.status = "connecting" }
         busy = true
         error = nil
         Task {
@@ -566,7 +561,7 @@ final class AppModel: ObservableObject {
     }
     private func loadDemo(page: String?) {
         serviceAvailable = true
-        state = ServiceState(whatsapp: .init(status: "ready", linked: true, lastSyncedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120)), syncState: "caught_up"), scope: Scope(mode: "selected", chatIDs: ["work", "family"]), mcp: .init(url: "http://127.0.0.1:32191", status: "ready"))
+        state = ServiceState(whatsapp: .init(status: "ready", linked: true), scope: Scope(mode: "selected", chatIDs: ["work", "family"]), mcp: .init(url: "http://127.0.0.1:32191", status: "ready"))
         selection = ChatSelection(chats: [Chat(id: "work", name: "Product team", kind: "group", lastActivity: "2026-10-23T07:30:00Z"), Chat(id: "family", name: "Family", kind: "group", lastActivity: "2026-10-23T07:20:00Z"), Chat(id: "renee", name: "Renée Santos", phone: "+1 (415) 555-0123", kind: "direct"), Chat(id: "long", name: "Weekend hiking plans and the very ambitious autumn road trip", kind: "group"), Chat(id: "phone", phone: "+44 20 5550 0123", kind: "direct")] + (1...100).map { Chat(id: "project-\($0)", name: "Project \($0)", kind: "group") }, selectedIDs: ["work", "family"])
         switch page {
         case "home-mcp", "home-mcp-expanded", "home-mcp-credentials":
@@ -574,11 +569,9 @@ final class AppModel: ObservableObject {
             agent.lastSeenAt = ISO8601DateFormatter().string(from: Date())
             state.agents = [agent]
             if page != "home-mcp" { toggleLocalMCP() }
-        case "synced", "syncing":
+        case "connected":
             state.scope = Scope(mode: "all")
             selection.chats += (101...1287).map { Chat(id: "project-\($0)", name: "Project \($0)", kind: "group") }
-            state.whatsapp.syncState = page == "synced" ? "caught_up" : "syncing"
-            if page == "syncing" { state.whatsapp.lastSyncedAt = ISO8601DateFormatter().string(from: Date()) }
         case "settings-enabled": self.page = .settings; loginEnabled = true
         case "mcp", "mcp-agents", "mcp-expanded", "mcp-credentials", "mcp-long":
             self.page = .mcp

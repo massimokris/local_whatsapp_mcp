@@ -108,8 +108,8 @@ try:
         time.sleep(0.1)
     check(process.poll() is None and (data / 'control.sock').exists(), 'bundled service starts with private control')
     state = control('GET', '/state')
-    check(state['whatsapp'].get('sync_state') == 'unknown',
-          'unlinked service explicitly reports unknown message catch-up')
+    check('sync_state' not in state['whatsapp'] and 'last_synced_at' not in state['whatsapp'],
+          'service reports connection state without custom completion fields')
     credentials = data / 'credentials.db'
     check(credentials.is_file() and credentials.stat().st_mode & 0o777 == 0o600,
           'credential database is stored locally with owner-only permissions')
@@ -210,9 +210,11 @@ try:
     check(len(listing['tools']) == 9, 'HTTP-paired bearer discovers all nine MCP tools')
     tool_status = rpc(paired, 'tools/call', {'name': 'check_status', 'arguments': {}}, 3)
     check(not tool_status.get('isError', False), 'HTTP-paired bearer calls authenticated status')
-    check(tool_status['structuredContent']['whatsapp']['sync_state']
-          == control('GET', '/state')['whatsapp']['sync_state'] == 'unknown',
-          'private state and authenticated MCP share explicit catch-up state without completion evidence')
+    check(tool_status['structuredContent']['whatsapp']['status']
+          == control('GET', '/state')['whatsapp']['status']
+          and 'sync_state' not in tool_status['structuredContent']['whatsapp']
+          and 'last_synced_at' not in tool_status['structuredContent']['whatsapp'],
+          'private state and authenticated MCP share connection status without completion fields')
     def tool(name, arguments, request_id):
         result = rpc(paired, 'tools/call', {'name': name, 'arguments': arguments}, request_id)
         if result.get('isError', False):
@@ -247,7 +249,7 @@ try:
     before_disconnect = control('GET', '/state')
     disconnected = control('POST', '/whatsapp/disconnect')
     check(disconnected['whatsapp']['status'] == 'disconnected' and not disconnected['whatsapp'].get('linked')
-          and disconnected['whatsapp'].get('sync_state') == 'unknown'
+          and 'sync_state' not in disconnected['whatsapp']
           and disconnected['scope'] == before_disconnect['scope']
           and {grant['id'] for grant in disconnected['agents']} == {grant['id'] for grant in before_disconnect['agents']},
           'disconnect preserves saved scope and agent grants in the actual bundle')

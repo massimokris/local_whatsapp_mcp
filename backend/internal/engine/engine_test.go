@@ -97,7 +97,7 @@ func TestPinnedEngineStructuredBoundary(t *testing.T) {
 	}
 }
 
-func TestLiveProgressReportsSyncingWithoutClaimingHistoryImport(t *testing.T) {
+func TestLiveProgressDoesNotChangeConnectedStatus(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "wacli")
 	script := `#!/bin/sh
@@ -114,10 +114,10 @@ exec /bin/cat >/dev/null
 		t.Fatal(err)
 	}
 	defer e.Stop(ctx)
-	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline) && e.Status().Status != "syncing"; time.Sleep(time.Millisecond) {
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline) && e.Status().Status != "ready"; time.Sleep(time.Millisecond) {
 	}
 	status := e.Status()
-	if status.Status != "syncing" || strings.Contains(status.Detail, "Importing") || status.LastEventAt == "" {
+	if status.Status != "ready" || strings.Contains(status.Detail, "Importing") || status.LastEventAt == "" {
 		t.Fatalf("misleading live progress: %+v", status)
 	}
 }

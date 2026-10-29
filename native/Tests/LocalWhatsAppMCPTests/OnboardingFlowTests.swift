@@ -5,6 +5,33 @@ import LocalWhatsAppCore
 
 @MainActor
 final class OnboardingFlowTests: XCTestCase {
+    func testConnectedServiceNeedsNoSyncMetadata() async throws {
+        let (model, _) = try makeModel(state: [
+            "whatsapp": ["linked": true, "status": "connected"],
+            "scope": ["mode": "all"],
+            "agents": [],
+            "mcp": ["url": "http://127.0.0.1:32191/mcp", "status": "ready"]
+        ])
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
+        XCTAssertNil(model.connectionError)
+        XCTAssertTrue(model.canCreateConnection)
+    }
+
+    func testLegacySyncMetadataCannotOverrideConnectionState() async throws {
+        let (model, fixture) = try makeModel()
+        for oldState in ["caught_up", "syncing", "incomplete", "error", "unknown"] {
+            var response = serviceState(status: "ready", scope: "all")
+            response["whatsapp"] = ["linked": true, "status": "ready", "sync_state": oldState,
+                                    "last_synced_at": "2026-10-01T12:00:00Z"]
+            try fixture.write(response, to: "state.json")
+            await model.refresh()
+            XCTAssertEqual(model.statusLabel, "Connected to this Mac")
+            XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
+            XCTAssertNil(model.connectionError)
+        }
+    }
+
     func testInitialLinkOpensChooserThenSelectedScopeOpensAgentSetup() async throws {
         let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "disconnected"))
         model.panelOpened()
@@ -50,6 +77,94 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertTrue(model.canCreateConnection)
         XCTAssertEqual(try fixture.scopeRequest()["mode"] as? String, "all")
         XCTAssertEqual(try fixture.scopeRequest()["chat_ids"] as? [String], [])
+    }
+
+    func testTerminalLogoutAfterScanStaysVisibleUntilExplicitRetry() async throws {
+        let logoutDetail = "WhatsApp disconnected this linked device. Connect WhatsApp again."
+        let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "linking", qr: "SYNTHETIC-INITIAL-QR"))
+        model.page = .qr
+        await model.refresh()
+        XCTAssertEqual(model.statusLabel, "Waiting for your phone")
+        XCTAssertNil(model.connectionError)
+
+        // The phone accepting pairing is not proof of a surviving authenticated
+        // connection. A terminal logout before the next poll must remain visible.
+        try fixture.write(serviceState(linked: false, status: "attention", detail: logoutDetail), to: "state.json")
+        for _ in 0..<3 { await model.refresh() }
+        XCTAssertEqual(model.page, .qr)
+        XCTAssertFalse(model.whatsappLinked)
+        XCTAssertEqual(model.connectionError, logoutDetail)
+        XCTAssertTrue(model.whatsappNeedsReconnect)
+        XCTAssertNil(model.state.whatsapp.qr)
+        XCTAssertFalse(fixture.exists("connect-requested"), "Background polling must not repeatedly relink a revoked session")
+        XCTAssertFalse(model.canCreateConnection)
+
+        model.connectWhatsApp()
+        try await waitUntil { !model.busy && fixture.exists("connect-requested") }
+        XCTAssertEqual(model.page, .qr)
+        XCTAssertEqual(model.statusLabel, "Waiting for your phone")
+        XCTAssertNil(model.connectionError)
+        XCTAssertNotNil(model.state.whatsapp.qr)
+        XCTAssertFalse(model.whatsappLinked)
+        XCTAssertFalse(model.state.scope.isConfirmed)
+
+        try fixture.write(serviceState(), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .chats)
+        XCTAssertTrue(model.whatsappLinked)
+        XCTAssertFalse(model.canCreateConnection, "Relinking must still require the initial chat-scope confirmation")
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac")
+    }
+
+    func testDelayedTerminalLogoutPollCannotReplaceFreshRetryQRCode() async throws {
+        let logoutDetail = "WhatsApp disconnected this linked device. Connect WhatsApp again."
+        let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "attention", detail: logoutDetail))
+        model.page = .qr
+        await model.refresh()
+        XCTAssertEqual(model.connectionError, logoutDetail)
+
+        try fixture.hold("state")
+        fixture.remove("state-requested")
+        let stalePoll = Task { await model.refresh() }
+        try await waitUntil { fixture.exists("state-requested") }
+        model.connectWhatsApp()
+        try await waitUntil { !model.busy && fixture.exists("connect-requested") }
+        let retryQRCode = try XCTUnwrap(model.state.whatsapp.qr)
+        fixture.release("state")
+        await stalePoll.value
+
+        XCTAssertEqual(model.state.whatsapp.qr, retryQRCode)
+        XCTAssertEqual(model.statusLabel, "Waiting for your phone")
+        XCTAssertNil(model.connectionError)
+        XCTAssertFalse(model.whatsappNeedsReconnect)
+        XCTAssertFalse(model.whatsappLinked)
+        XCTAssertEqual(model.page, .qr)
+    }
+
+    func testTemporaryDisconnectAfterScanKeepsSavedLinkWithoutRelinking() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "linking", qr: "SYNTHETIC-INITIAL-QR"))
+        model.page = .qr
+        await model.refresh()
+        try fixture.write(serviceState(), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .chats)
+
+        try fixture.write(serviceState(status: "connecting"), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .chats)
+        XCTAssertTrue(model.whatsappLinked)
+        XCTAssertFalse(model.whatsappConnected)
+        XCTAssertFalse(model.whatsappNeedsReconnect)
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
+        XCTAssertNil(model.connectionError)
+        XCTAssertFalse(fixture.exists("connect-requested"))
+
+        try fixture.write(serviceState(status: "ready"), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .chats)
+        XCTAssertTrue(model.whatsappConnected)
+        XCTAssertNil(model.connectionError)
+        XCTAssertFalse(model.state.scope.isConfirmed)
     }
 
     func testSyntheticPreviewUsesTheSameInitialSetupHandoffs() {
@@ -203,130 +318,188 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(model.selection.query, "Family")
     }
 
-    func testSyncPreviewLabelsAndConnectionFailures() {
-        let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-SyncTests-\(UUID().uuidString)"))
+    func testConnectionCountUsesSavedScopeAndVerifiedAliases() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(scope: "selected", chatIDs: ["1@s.whatsapp.net", "2@lid"]))
+        try fixture.write(["chats": [
+            ["id": "1@s.whatsapp.net", "aliases": ["1@s.whatsapp.net", "2@lid"]],
+            ["id": "2@lid", "aliases": ["1@s.whatsapp.net", "2@lid"]],
+            ["id": "group@g.us"]
+        ]], to: "catalog.json")
+        XCTAssertEqual(model.connectedChatsSummary, "Loading connected chats…")
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 1 chat connected")
+        model.selection.selectedIDs = ["group@g.us"]
+        model.selection.query = "No matching name"
+        XCTAssertEqual(model.connectedChatsSummary, "1 chat connected")
+
+        try fixture.write(serviceState(scope: "all"), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.connectedChatsSummary, "2 chats connected")
+        try fixture.write(serviceState(scope: "selected"), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.connectedChatsSummary, "0 chats connected")
+    }
+
+    func testIntentionalDisconnectStaysDisconnectedDuringBackgroundPolling() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(scope: "all"))
+        await model.refresh()
+        try fixture.write(serviceState(linked: false, status: "disconnected", scope: "all"), to: "disconnect-response.json")
+        try fixture.hold("disconnect")
+        model.disconnectWhatsApp()
+        XCTAssertEqual(model.homeSubtitle, "Disconnecting…")
+        try await waitUntil { fixture.exists("disconnect-requested") }
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Disconnecting…")
+        fixture.release("disconnect")
+        try await waitUntil { !model.busy }
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Not connected")
+        XCTAssertFalse(model.whatsappLinked)
+        XCTAssertEqual(model.page, .home)
+        XCTAssertNil(model.connectionError)
+        XCTAssertFalse(fixture.exists("connect-requested"))
+    }
+
+    func testConnectionPreviewAndActualFailures() {
+        let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-ConnectionTests-\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }
-        let model = AppModel(environment: ["LWMCP_DEMO": "1", "LWMCP_DEMO_PAGE": "synced"], pasteboard: pasteboard)
-        XCTAssertEqual(model.homeSubtitle, "Synced just now - 1,292 chats connected")
-        model.state.whatsapp.syncState = "syncing"
-        XCTAssertEqual(model.homeSubtitle, "Syncing messages… - 1,292 chats connected")
-        model.state.whatsapp.syncState = "caught_up"
+        let model = AppModel(environment: ["LWMCP_DEMO": "1", "LWMCP_DEMO_PAGE": "connected"], pasteboard: pasteboard)
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 1,292 chats connected")
         for (status, label) in [("connecting", "Reconnecting…"), ("attention", "Needs attention"), ("disconnected", "Connection paused")] {
             model.state.whatsapp.status = status
             XCTAssertEqual(model.homeSubtitle, label)
         }
-        model.state.whatsapp.status = "ready"
-        model.state.whatsapp.syncState = "error"
-        XCTAssertEqual(model.homeSubtitle, "Needs attention")
     }
 
-    func testWakeClearsSuccessImmediatelyAndRejectsEarlierPoll() async throws {
-        let caughtUp = serviceState(status: "ready", scope: "all", syncState: "caught_up")
-        let (model, fixture) = try makeModel(state: caughtUp)
+    func testActualConnectionFailureRemainsVisibleAndClearsWhenConnected() async throws {
+        let failureDetail = "The WhatsApp archive could not be opened. Check available storage."
+        let (model, fixture) = try makeModel(state: serviceState(status: "attention", scope: "all", detail: failureDetail))
         await model.refresh()
-        XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+        XCTAssertEqual(model.homeSubtitle, "Needs attention")
+        XCTAssertEqual(model.connectionError, failureDetail)
+        XCTAssertTrue(model.whatsappNeedsReconnect)
+
+        try fixture.write(serviceState(scope: "all"), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
+        XCTAssertNil(model.connectionError)
+        XCTAssertFalse(model.whatsappNeedsReconnect)
+    }
+
+    func testWakeShowsReconnectImmediatelyAndRejectsEarlierPoll() async throws {
+        let connected = serviceState(scope: "all")
+        let (model, fixture) = try makeModel(state: connected)
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
         try fixture.hold("state")
         fixture.remove("state-requested")
         let earlierPoll = Task { await model.refresh() }
         try await waitUntil { fixture.exists("state-requested") }
         try fixture.hold("wake")
-        try fixture.write(serviceState(status: "connecting", scope: "all", syncState: "unknown"), to: "wake-response.json")
+        try fixture.write(serviceState(status: "connecting", scope: "all"), to: "wake-response.json")
         model.wake()
-        XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
         XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
         try await waitUntil { fixture.exists("wake-requested") }
         fixture.release("state")
         await earlierPoll.value
-        XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
         fixture.release("wake")
         try await waitUntil { !model.busy }
         XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
-        try fixture.write(caughtUp, to: "state.json")
+        try fixture.write(connected, to: "state.json")
         await model.refresh()
-        XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
     }
 
-    func testReconnectAndScopeSaveClearCachedSuccessBeforeResponse() async throws {
-        for operation in ["connect", "scope"] {
-            let (model, fixture) = try makeModel(state: serviceState(status: "ready", scope: "all", syncState: "caught_up"))
-            await model.refresh()
-            XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
-            try fixture.hold(operation)
-            if operation == "connect" { model.connectWhatsApp() }
-            else {
-                try fixture.write(serviceState(status: "ready", scope: "selected", chatIDs: ["team"], syncState: "syncing"), to: "scope-response.json")
-                model.selection.selectedIDs = ["team"]
-                model.saveScope(all: false)
-            }
-            XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
-            XCTAssertFalse(model.homeSubtitle.contains("Synced just now"))
-            try await waitUntil { fixture.exists("\(operation)-requested") }
-            await model.refresh()
-            XCTAssertFalse(model.homeSubtitle.contains("Synced just now"), "A poll during the operation cannot restore old success")
-            fixture.release(operation)
-            try await waitUntil { !model.busy }
-            XCTAssertFalse(model.homeSubtitle.contains("Synced just now"))
-        }
+    func testReconnectCannotBeOverwrittenByPollDuringAction() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(scope: "all"))
+        await model.refresh()
+        try fixture.hold("connect")
+        model.connectWhatsApp()
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
+        try await waitUntil { fixture.exists("connect-requested") }
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
+        fixture.release("connect")
+        try await waitUntil { !model.busy }
+        XCTAssertEqual(model.homeSubtitle, "Waiting for your phone")
+        XCTAssertFalse(model.whatsappLinked)
+        XCTAssertNotNil(model.state.whatsapp.qr)
     }
 
-    func testStateReadFailureClearsSuccessButCatalogFailureDoesNotInvalidateCompletion() async throws {
-        let (model, fixture) = try makeModel(state: serviceState(status: "ready", scope: "all", syncState: "caught_up"))
+    func testScopeSaveKeepsConnectionAndUsesSavedChatCount() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(scope: "all"))
         await model.refresh()
-        XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+        model.selection.selectedIDs = ["team"]
+        model.selection.query = "Family"
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
+        try fixture.write(serviceState(scope: "selected", chatIDs: ["team"]), to: "scope-response.json")
+        try fixture.hold("scope")
+        model.saveScope(all: false)
+        try await waitUntil { fixture.exists("scope-requested") }
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
+        fixture.release("scope")
+        try await waitUntil { !model.busy }
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 1 chat connected")
+        XCTAssertNil(model.connectionError)
+    }
+
+    func testStateReadFailureHidesConnectionButCatalogFailureDoesNotDisconnect() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(scope: "all"))
+        await model.refresh()
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
         fixture.remove("catalog.json")
         model.editChats()
         await model.refresh()
         try await waitUntil { model.error != nil }
         XCTAssertTrue(model.serviceAvailable)
-        XCTAssertTrue(model.homeSubtitle.hasPrefix("Synced just now"))
+        XCTAssertEqual(model.homeSubtitle, "Connected to this Mac - 2 chats connected")
         fixture.remove("state.json")
         await model.refresh()
         XCTAssertFalse(model.serviceAvailable)
-        XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
         XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
     }
 
-    func testWakeQueuedDuringScopeSaveStillRequiresFreshCompletion() async throws {
-        let caughtUp = serviceState(status: "ready", scope: "all", syncState: "caught_up")
-        let (model, fixture) = try makeModel(state: caughtUp)
+    func testWakeQueuedDuringScopeSaveStillRuns() async throws {
+        let connected = serviceState(scope: "all")
+        let (model, fixture) = try makeModel(state: connected)
         await model.refresh()
-        try fixture.write(caughtUp, to: "scope-response.json")
-        try fixture.write(serviceState(status: "connecting", scope: "all", syncState: "unknown"), to: "wake-response.json")
+        try fixture.write(connected, to: "scope-response.json")
+        try fixture.write(serviceState(status: "connecting", scope: "all"), to: "wake-response.json")
         try fixture.hold("scope")
         try fixture.hold("wake")
         model.saveScope(all: true)
         try await waitUntil { fixture.exists("scope-requested") }
         model.wake()
-        XCTAssertNotEqual(model.state.whatsapp.syncState, "caught_up")
         fixture.release("scope")
         try await waitUntil { fixture.exists("wake-requested") }
-        XCTAssertFalse(model.homeSubtitle.contains("Synced just now"))
+        XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
         fixture.release("wake")
         try await waitUntil { !model.busy }
         XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
     }
 
     func testFailedMutationRefreshesStateAfterClearingBusy() async throws {
-        let (model, fixture) = try makeModel(state: serviceState(status: "ready", scope: "all", syncState: "caught_up"))
+        let (model, fixture) = try makeModel(state: serviceState(scope: "all"))
         await model.refresh()
         try fixture.write(["error": "Synthetic scope save failed"], to: "scope-failure.json")
-        try fixture.write(serviceState(status: "ready", scope: "all", syncState: "syncing"), to: "state.json")
+        try fixture.write(serviceState(status: "connecting", scope: "all"), to: "state.json")
         model.saveScope(all: false)
-        try await waitUntil { !model.busy && model.state.whatsapp.syncState == "syncing" }
+        try await waitUntil { !model.busy && model.state.whatsapp.status == "connecting" }
         XCTAssertEqual(model.error, "Synthetic scope save failed")
     }
 
     func testWakeQueuedDuringPairingStillRuns() async throws {
-        let (model, fixture) = try makeModel(state: serviceState(status: "ready", scope: "all", syncState: "caught_up"))
+        let (model, fixture) = try makeModel(state: serviceState(scope: "all"))
         await model.refresh()
         model.page = .mcp
         try fixture.write(["instructions": "Synthetic setup instructions", "expires_at": ISO8601DateFormatter().string(from: Date().addingTimeInterval(600)), "invitation_id": "synthetic"], to: "pairing-response.json")
-        try fixture.write(serviceState(status: "connecting", scope: "all", syncState: "unknown"), to: "wake-response.json")
+        try fixture.write(serviceState(status: "connecting", scope: "all"), to: "wake-response.json")
         try fixture.hold("pairing")
         model.copyInstructions()
         try await waitUntil { fixture.exists("pairing-requested") }
         model.wake()
-        XCTAssertFalse(model.homeSubtitle.contains("Synced just now"))
         fixture.release("pairing")
         try await waitUntil { fixture.exists("wake-requested") && !model.busy }
         XCTAssertEqual(model.homeSubtitle, "Reconnecting…")
@@ -341,9 +514,10 @@ final class OnboardingFlowTests: XCTestCase {
         throw FixtureFailure.timedOut
     }
 
-    private func serviceState(linked: Bool = true, status: String = "syncing", scope: String = "initial", chatIDs: [String] = [], syncState: String? = nil) -> [String: Any] {
-        var whatsapp: [String: Any] = ["linked": linked, "status": status, "last_synced_at": "2026-10-01T12:00:00Z"]
-        if let syncState { whatsapp["sync_state"] = syncState }
+    private func serviceState(linked: Bool = true, status: String = "ready", scope: String = "initial", chatIDs: [String] = [], detail: String? = nil, qr: String? = nil) -> [String: Any] {
+        var whatsapp: [String: Any] = ["linked": linked, "status": status]
+        if let detail { whatsapp["detail"] = detail }
+        if let qr { whatsapp["qr"] = qr }
         return ["whatsapp": whatsapp,
          "scope": ["mode": scope, "chat_ids": chatIDs],
          "agents": [],
@@ -360,6 +534,7 @@ final class OnboardingFlowTests: XCTestCase {
             fixture.release("state")
             fixture.release("wake")
             fixture.release("connect")
+            fixture.release("disconnect")
             fixture.release("pairing")
             await model.stop()
             pasteboard.releaseGlobally()
@@ -412,6 +587,12 @@ private struct ServiceFixture {
             /usr/bin/touch "$fixture_dir/connect-requested"
             while [ -e "$fixture_dir/connect-hold" ]; do /bin/sleep 0.01; done
             /bin/cp "$fixture_dir/connect-response.json" "$fixture_dir/state.json"
+            /bin/cat "$fixture_dir/state.json"
+            ;;
+          'POST /whatsapp/disconnect')
+            /usr/bin/touch "$fixture_dir/disconnect-requested"
+            while [ -e "$fixture_dir/disconnect-hold" ]; do /bin/sleep 0.01; done
+            /bin/cp "$fixture_dir/disconnect-response.json" "$fixture_dir/state.json"
             /bin/cat "$fixture_dir/state.json"
             ;;
           'POST /lifecycle/wake')

@@ -50,8 +50,7 @@ GOARCH=$(go env GOHOSTARCH) go run "$root/packaging/notices.go" "$root/backend" 
   printf 'Source tree: '; if [ -z "$(git -C "$root" status --porcelain)" ]; then printf 'clean\n'; else printf 'modified\n'; fi
   printf 'Engine upstream: '; cat "$root/vendor/wacli/UPSTREAM_REVISION"
   printf 'Engine patch SHA256: '; shasum -a 256 "$root/vendor/wacli/content-policy.patch" | awk '{ print $1 }'
-  printf 'Delivery dependency: '; (cd "$root/vendor/wacli/.build/pinned-source" && go list -m -f '{{.Path}} {{.Version}}' go.mau.fi/whatsmeow)
-  printf 'Delivery patch SHA256: '; shasum -a 256 "$root/vendor/wacli/whatsmeow-delivery.patch" | awk '{ print $1 }'
+  printf 'WhatsApp dependency (unmodified): '; (cd "$root/vendor/wacli/.build/pinned-source" && go list -m -f '{{.Path}} {{.Version}}' go.mau.fi/whatsmeow)
   go version
   swift --version 2>&1
   printf 'SDK version: '; xcrun --sdk macosx --show-sdk-version
