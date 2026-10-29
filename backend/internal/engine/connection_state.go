@@ -27,6 +27,14 @@ func (e *Engine) observeEvent(event engineEvent, now time.Time) {
 		e.status.QR = event.Data.Code
 		e.status.Linked = false
 		e.status.Detail = "Scan this code using WhatsApp Linked Devices."
+	case "paired":
+		if e.status.Linked || (e.status.Status != "linking" && e.status.Status != "connecting") {
+			return
+		}
+		// The phone accepted pairing; authenticated login still follows. Keep
+		// the displayed QR so the app can obscure it while that login finishes.
+		e.status.Status = "logging_in"
+		e.status.Detail = "Connecting to WhatsApp."
 	case "connected":
 		e.status.Status = "ready"
 		e.status.Detail = "Connected to WhatsApp."

@@ -65,6 +65,13 @@ base=$(dirname "$0")
 wait_stage(){ while [ ! -f "$base/$1" ]; do sleep 0.01; done; }
 emit(){ printf '{"event":"%s"}\n' "$1" >&2; }
 printf '%s\n' '{"event":"policy_loaded","data":{"revision":1}}' >&2
+printf '%s\n' '{"event":"qr_code","data":{"code":"SYNTHETIC-QR-A"}}' >&2
+emit paired
+wait_stage interrupted
+emit disconnected
+wait_stage fresh_qr
+printf '%s\n' '{"event":"qr_code","data":{"code":"SYNTHETIC-QR-B"}}' >&2
+wait_stage paired_again
 emit paired
 wait_stage connect
 emit connected
@@ -87,19 +94,30 @@ exec /bin/cat >/dev/null
 	if err := e.Start(ctx, engine.Policy{Version: 1, Revision: 1, Mode: "all"}, false); err != nil {
 		t.Fatal(err)
 	}
-	if state := e.Status(); state.Linked || state.Status != "connecting" {
-		t.Fatalf("pairing implied confirmed connection: %+v", state)
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline) && e.Status().Status != "logging_in"; time.Sleep(time.Millisecond) {
+	}
+	if state := e.Status(); state.Linked || state.Status != "logging_in" || state.QR != "SYNTHETIC-QR-A" {
+		t.Fatalf("accepted pairing must retain the QR without confirming connection: %+v", state)
 	}
 	for _, phase := range []struct {
 		trigger, status string
 		linked          bool
-	}{{"connect", "ready", true}, {"disconnect", "connecting", true}, {"reconnect", "ready", true}, {"logout", "attention", false}} {
+		qr              string
+	}{
+		{"interrupted", "connecting", false, ""},
+		{"fresh_qr", "linking", false, "SYNTHETIC-QR-B"},
+		{"paired_again", "logging_in", false, "SYNTHETIC-QR-B"},
+		{"connect", "ready", true, ""},
+		{"disconnect", "connecting", true, ""},
+		{"reconnect", "ready", true, ""},
+		{"logout", "attention", false, ""},
+	} {
 		if err := os.WriteFile(filepath.Join(dir, phase.trigger), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 		for deadline := time.Now().Add(time.Second); time.Now().Before(deadline) && e.Status().Status != phase.status; time.Sleep(time.Millisecond) {
 		}
-		if state := e.Status(); state.Status != phase.status || state.Linked != phase.linked {
+		if state := e.Status(); state.Status != phase.status || state.Linked != phase.linked || state.QR != phase.qr {
 			t.Fatalf("%s: %+v", phase.trigger, state)
 		}
 	}

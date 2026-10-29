@@ -53,7 +53,12 @@ func TestConnectionEventsKeepLogoutTerminalForOwnedProcess(t *testing.T) {
 	e := New("unused", t.TempDir())
 	now := time.Now()
 	e.observeEvent(engineEvent{Event: "connected"}, now)
+	e.observeEvent(engineEvent{Event: "paired"}, now)
+	if state := e.Status(); state.Status != "ready" || !state.Linked {
+		t.Fatalf("late pairing replaced confirmed connection: %+v", state)
+	}
 	e.observeEvent(engineEvent{Event: "disconnected"}, now)
+	e.observeEvent(engineEvent{Event: "paired"}, now)
 	if state := e.Status(); state.Status != "connecting" || !state.Linked {
 		t.Fatalf("disconnect lost saved link: %+v", state)
 	}
@@ -62,7 +67,7 @@ func TestConnectionEventsKeepLogoutTerminalForOwnedProcess(t *testing.T) {
 		t.Fatal("upstream reconnect not reflected")
 	}
 	e.observeEvent(engineEvent{Event: "logged_out"}, now)
-	for _, name := range []string{"connected", "progress", "sync_state", "qr_code"} {
+	for _, name := range []string{"connected", "paired", "progress", "sync_state", "qr_code"} {
 		e.observeEvent(engineEvent{Event: name}, now)
 	}
 	if state := e.Status(); state.Status != "attention" || state.Linked {
