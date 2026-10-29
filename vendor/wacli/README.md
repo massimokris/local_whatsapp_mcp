@@ -106,6 +106,50 @@ edit. Scope exclusions and optional attachment downloads do not become message
 sync errors. An unreadable/unwritable journal prevents starting sync and requires
 repair while preserving the archive.
 
+App-state work also records its event kind, required collections, and a durable
+sequence. A verified full snapshot settles only the earlier work it covers after
+ordered persistence succeeds; newer failures and unrelated work remain pending.
+Startup reconstructs missing collection-recovery markers from that journal.
+Older opaque event hashes are settled only by successful replay of the same
+action, allowing for its full-sync delivery flag. Unmatched legacy failures stay
+visible rather than being discarded on reconnect.
+
+Receipt work retains its identifiers, receipt type and timestamp for local retry
+after restart, without message bodies. Retry uses the current chat policy and
+the saved account identity, updates only the local archive, and never sends a
+receipt or message. Empty message IDs are ignored without dropping valid IDs in
+the same receipt batch; real database errors remain recoverable failures.
+
+The SDK also reports intentionally unavailable view-once content through its
+undecryptable-message event. An explicit `is_unavailable` plus `view_once` type
+is an expected absence and does not create a permanent sync failure. Its warning
+remains visible; a matching event can settle only its exact older false failure.
+Unknown unavailable types and hidden decryption failures still require recovery.
+New unresolved decryption events retain their original timestamp, bounded
+classification flags, and sender identities in the private journal so diagnosis
+can distinguish replayed old work from a new failure after restart. Message
+bodies, display names, keys and arbitrary error strings are not retained there.
+Older entries without this evidence remain unclassified.
+
+For operator recovery of older journals, `sync --repair-sync` requests full
+app-state replay when opaque event failures remain and makes bounded requests
+to the user's primary device for missing non-mutation messages. It neither
+deletes archive data nor clears a failure merely because a request was accepted.
+An incoming group message whose old journal lost its sender may remain
+unrecoverable until the primary supplies a matching readable copy. Stop the
+app-owned service before running a separate writer, retain the same store and
+content policy, and keep the phone online. This engine option is not an MCP
+operation; ordinary app startup does not enable it.
+
+An explicitly approved fresh baseline is separate operator maintenance. Stop the
+app and hold both the service and engine writer locks, take a complete private
+backup, then durably archive the exact recovery journal and an acknowledgement
+audit under `store/sync-baselines/` before atomically emptying only the active
+journal. This acknowledges unverified historical work; it does not recover that
+work or delete messages, media, session data, credentials or scope. Restart must
+still establish catch-up from a fresh delivery boundary. Never perform this
+reset automatically on reconnect or ordinary startup.
+
 Only explicit completion events establish `caught_up`; periodic snapshots prove
 liveness and can invalidate a failed connection check. Quiet healthy connections
 remain caught up without a time expiry. `last_synced_at` remains the persisted
