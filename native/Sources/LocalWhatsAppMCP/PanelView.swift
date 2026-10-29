@@ -6,6 +6,7 @@ import CoreImage.CIFilterBuiltins
 struct PanelView: View {
     @ObservedObject var model: AppModel
     let quit: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sourceExpanded = false
     @State private var confirmDisconnect = false
     @State private var qrHovered = false
@@ -168,7 +169,7 @@ struct PanelView: View {
     }
     private var connection: some View {
         VStack(spacing: 0) {
-            heading(model.whatsappConnected ? "WhatsApp connected" : "Connect WhatsApp", subtitle: model.whatsappConnected ? "Your messages can now sync to this Mac." : "Scan the QR code with your phone")
+            heading(model.whatsappConnected ? "WhatsApp connected" : "Connect WhatsApp", subtitle: model.whatsappConnected ? "Your messages can now sync to this Mac." : (model.whatsappLoggingIn ? "Finishing your connection to WhatsApp" : "Scan the QR code with your phone"))
                 .padding(.top, 13).padding(.bottom, 24)
             ScrollView {
                 SoftCard {
@@ -180,7 +181,7 @@ struct PanelView: View {
                             instruction(4, "Scan the QR code below")
                         }
                         qrTile.frame(maxWidth: .infinity).padding(.top, 3)
-                        Text(model.whatsappConnected ? "You’re connected" : "Code refreshes automatically")
+                        Text(model.whatsappConnected ? "You’re connected" : (model.whatsappLoggingIn ? "Keep WhatsApp open on your phone" : "Code refreshes automatically"))
                             .font(Theme.font(10)).foregroundStyle(Theme.secondary)
                             .frame(maxWidth: .infinity).padding(.top, 3)
                     }.padding(16)
@@ -210,6 +211,22 @@ struct PanelView: View {
             } else if model.whatsappConnected {
                 Image(systemName: "checkmark.circle.fill").font(.system(size: 52, weight: .light)).foregroundStyle(Theme.green)
                     .accessibilityLabel("WhatsApp connected")
+            } else if model.whatsappLoggingIn {
+                ZStack {
+                    if let payload = model.state.whatsapp.qr, !payload.isEmpty {
+                        QRCode(payload: payload, obscured: true).padding(24).opacity(0.25)
+                    }
+                    VStack(spacing: 12) {
+                        if reduceMotion {
+                            Image(systemName: "hourglass").font(.system(size: 28))
+                        } else {
+                            ProgressView().controlSize(.large).environment(\.colorScheme, .light)
+                        }
+                        Text("Connecting…").font(Theme.font(12, weight: .medium))
+                    }.foregroundStyle(Theme.background)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Connecting to WhatsApp")
             } else if model.busy {
                 qrLoading
             } else if let payload = model.state.whatsapp.qr, !payload.isEmpty {
@@ -223,7 +240,7 @@ struct PanelView: View {
                         .contentShape(RoundedRectangle(cornerRadius: 18))
                 }.buttonStyle(.plain).focused($qrRefreshFocused)
                     .onHover { hovering in
-                        withAnimation(.easeInOut(duration: 0.15)) { qrHovered = hovering }
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { qrHovered = hovering }
                     }
                     .accessibilityLabel("Refresh QR code")
                     .accessibilityHint("Scan the code with WhatsApp on your phone, or activate to request a new code.")

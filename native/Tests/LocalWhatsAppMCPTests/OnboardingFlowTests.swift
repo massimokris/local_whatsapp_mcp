@@ -5,6 +5,312 @@ import LocalWhatsAppCore
 
 @MainActor
 final class OnboardingFlowTests: XCTestCase {
+    func testLoggingInWithoutCodeDoesNotStartAnotherLink() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "logging_in"))
+        model.panelOpened()
+        await model.refresh()
+        XCTAssertEqual(model.page, .qr)
+        XCTAssertTrue(model.whatsappLoggingIn)
+        XCTAssertEqual(model.statusLabel, "Connecting…")
+        XCTAssertFalse(model.whatsappConnected)
+        XCTAssertFalse(fixture.exists("connect-requested"))
+        model.showConnection()
+        XCTAssertFalse(model.busy)
+    }
+
+    func testPollStartedBeforeLeavingAndReopeningQRCannotScheduleSuccess() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "linking", qr: "SYNTHETIC-QR"))
+        model.page = .qr
+        await model.refresh()
+        try fixture.write(serviceState(), to: "state.json")
+        fixture.remove("state-requested")
+        try fixture.hold("state")
+        let oldPoll = Task { await model.refresh() }
+        try await waitUntil { fixture.exists("state-requested") }
+        model.page = .settings
+        model.showConnection()
+        fixture.release("state")
+        await oldPoll.value
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertEqual(model.page, .qr)
+        XCTAssertFalse(fixture.exists("connect-requested"))
+        await model.refresh()
+        XCTAssertEqual(model.page, .chats)
+    }
+
+    func testRetryRejectsDelayedSuccessFromPreviousAttempt() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "linking", qr: "SYNTHETIC-OLD-QR"))
+        model.page = .qr
+        await model.refresh()
+        try fixture.write(serviceState(), to: "state.json")
+        await model.refresh()
+        fixture.remove("state-requested")
+        try fixture.hold("state")
+        try await waitUntil { fixture.exists("state-requested") }
+
+        model.connectWhatsApp()
+        try await waitUntil { !model.busy && fixture.exists("connect-requested") }
+        fixture.release("state")
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertEqual(model.page, .qr)
+        XCTAssertEqual(model.statusLabel, "Waiting for your phone")
+        XCTAssertFalse(model.whatsappConnected)
+
+        try fixture.write(serviceState(), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .qr, "The new attempt owns a new success presentation")
+        try await waitUntil { model.page == .chats }
+    }
+
+    func testNavigationOrStopCancelsPendingSuccessHandoff() async throws {
+        for destination in [AppModel.Page.home, .settings, .qr] {
+            let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "linking", qr: "SYNTHETIC-QR"))
+            model.page = .qr
+            await model.refresh()
+            try fixture.write(serviceState(), to: "state.json")
+            await model.refresh()
+            XCTAssertEqual(model.page, .qr)
+            if destination == .qr { await model.stop() }
+            else { model.page = destination }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            await model.refresh()
+            XCTAssertEqual(model.page, destination)
+        }
+    }
+
+    func testLogoutOrServiceFailureDuringSuccessDoesNotAdvanceSetup() async throws {
+        for failure in [serviceState(linked: false, status: "attention", detail: "Synthetic logout"), ["error": "Synthetic service unavailable"]] {
+            let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "linking", qr: "SYNTHETIC-QR"))
+            model.page = .qr
+            await model.refresh()
+            try fixture.write(serviceState(), to: "state.json")
+            await model.refresh()
+            XCTAssertEqual(model.page, .qr)
+            // The success hold must itself verify fresh state before advancing.
+            try fixture.write(failure, to: "state.json")
+            try await waitUntil { model.connectionError != nil }
+            XCTAssertEqual(model.page, .qr)
+            XCTAssertFalse(fixture.exists("connect-requested"))
+        }
+    }
+
+    func testHidingQRStopsPresentationDelayButFreshStateCanFinishSetup() async throws {
+        let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "linking", qr: "SYNTHETIC-QR"))
+        model.page = .qr
+        await model.refresh()
+        try fixture.write(serviceState(), to: "state.json")
+        await model.refresh()
+        model.panelClosed()
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertEqual(model.page, .qr, "Hiding cancels the visible success presentation")
+        await model.refresh()
+        XCTAssertEqual(model.page, .chats, "Background linking may prepare the next step for reopening")
+    }
+
+    func testScannedQRShowsConnectingThenConnectedBeforeChoosingChats() async throws {
+        let code = "SYNTHETIC-INITIAL-QR"
+        let (model, fixture) = try makeModel(state: serviceState(linked: false, status: "linking", qr: code))
+        model.page = .qr
+        await model.refresh()
+        XCTAssertEqual(model.statusLabel, "Waiting for your phone")
+        try fixture.write(serviceState(linked: false, status: "logging_in", qr: code), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .qr)
+        XCTAssertEqual(model.statusLabel, "Connecting…")
+        XCTAssertEqual(model.state.whatsapp.qr, code)
+        XCTAssertFalse(model.whatsappConnected)
+
+        try fixture.write(serviceState(), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .qr, "A real connection must be visible before the next step")
+        XCTAssertTrue(model.whatsappConnected)
+        try await waitUntil { model.page == .chats }
+        XCTAssertFalse(model.state.scope.isConfirmed)
+    }
+
+    func testDisconnectedAccountRepeatsChatSelectionAndAgentInstructions() async throws {
+        let disconnected = returningState(linked: false, status: "disconnected")
+        let (model, fixture) = try makeModel(state: disconnected)
+        await model.refresh()
+        try fixture.write(returningState(linked: false, status: "linking", qr: "SYNTHETIC-RETURNING-QR"), to: "connect-response.json")
+        model.connectWhatsApp()
+        try await waitUntil { !model.busy && fixture.exists("connect-requested") }
+        try fixture.write(returningState(), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .qr, "Repeat linking also shows its real connection confirmation")
+        try await waitUntil { model.page == .chats && !model.catalogPending }
+
+        XCTAssertEqual(model.page, .chats)
+        XCTAssertEqual(model.selection.selectedIDs, ["team"])
+        XCTAssertEqual(model.state.scope.mode, "selected")
+        XCTAssertEqual(model.agents.map(\.id), ["saved-agent"])
+        XCTAssertEqual(model.agents.first?.sendEnabled, true)
+        try fixture.write(returningState(), to: "scope-response.json")
+        model.saveScope(all: false)
+        try await waitUntil { !model.busy && fixture.exists("scope-request.json") }
+        XCTAssertEqual(model.page, .pairing, "Existing agents must not replace the Copy instructions step")
+        XCTAssertTrue(model.canCreateConnection)
+        XCTAssertEqual(model.agents.map(\.id), ["saved-agent"])
+    }
+
+    func testReconnectSetupResumesAcrossQRChooserAndAgentRelaunches() async throws {
+        let preferences = try makePreferences()
+        let linking = returningState(linked: false, status: "linking", qr: "SYNTHETIC-RETURNING-QR")
+        let (first, firstFixture) = try makeModel(state: returningState(linked: false, status: "disconnected"), preferences: preferences)
+        await first.refresh()
+        try firstFixture.write(linking, to: "connect-response.json")
+        first.connectWhatsApp()
+        try await waitUntil { !first.busy && firstFixture.exists("connect-requested") }
+        await first.stop()
+
+        let (qr, qrFixture) = try makeModel(state: linking, preferences: preferences)
+        qr.panelOpened()
+        await qr.refresh()
+        XCTAssertEqual(qr.page, .qr)
+        XCTAssertFalse(qrFixture.exists("connect-requested"))
+        try qrFixture.write(returningState(), to: "state.json")
+        await qr.refresh()
+        try await waitUntil { qr.page == .chats && !qr.catalogPending }
+        XCTAssertEqual(qr.page, .chats)
+        XCTAssertEqual(qr.selection.selectedIDs, ["team"])
+        await qr.stop()
+
+        let (chooser, chooserFixture) = try makeModel(state: returningState(), preferences: preferences)
+        await chooser.refresh()
+        XCTAssertEqual(chooser.page, .chats)
+        try chooserFixture.write(returningState(), to: "scope-response.json")
+        chooser.saveScope(all: false)
+        try await waitUntil { !chooser.busy && chooserFixture.exists("scope-request.json") }
+        XCTAssertEqual(chooser.page, .pairing)
+        await chooser.stop()
+
+        let (agent, agentFixture) = try makeModel(state: returningState(), preferences: preferences)
+        await agent.refresh()
+        XCTAssertEqual(agent.page, .pairing)
+        try agentFixture.write(["instructions": "Synthetic returning-account instructions", "expires_at": ISO8601DateFormatter().string(from: Date().addingTimeInterval(600)), "invitation_id": "returning-invitation"], to: "pairing-response.json")
+        agent.copyInstructions()
+        try await waitUntil { !agent.busy && agent.instructionsCopied }
+        XCTAssertEqual(agent.invitation?.instructions, "Synthetic returning-account instructions")
+        await agent.refresh()
+        XCTAssertEqual(agent.page, .pairing, "An already-saved agent cannot finish the new invitation")
+        agent.finishConnectionSetup()
+        await agent.stop()
+
+        let (finished, _) = try makeModel(state: returningState(), preferences: preferences)
+        await finished.refresh()
+        XCTAssertEqual(finished.page, .home)
+    }
+
+    func testReconnectSetupWaitsForFreshUnlinkedEvidenceBeforeFirstPoll() async throws {
+        let preferences = try makePreferences()
+        let (connecting, fixture) = try makeModel(preferences: preferences)
+        try fixture.write(returningState(linked: false, status: "linking", qr: "SYNTHETIC-RETURNING-QR"), to: "connect-response.json")
+        try fixture.hold("connect")
+        connecting.connectWhatsApp()
+        try await waitUntil { fixture.exists("connect-requested") }
+        let (beforeResponse, _) = try makeModel(state: returningState(), preferences: preferences)
+        await beforeResponse.refresh()
+        XCTAssertEqual(beforeResponse.page, .home, "The unloaded default model must not arm setup")
+        await beforeResponse.stop()
+        fixture.release("connect")
+        try await waitUntil { !connecting.busy }
+        await connecting.stop()
+
+        let (afterResponse, _) = try makeModel(state: returningState(), preferences: preferences)
+        await afterResponse.refresh()
+        XCTAssertEqual(afterResponse.page, .chats, "The authoritative QR response establishes a new link attempt")
+    }
+
+    func testSavedLinkedReconnectDoesNotRestartSetup() async throws {
+        let preferences = try makePreferences()
+        let (model, fixture) = try makeModel(state: returningState(status: "connecting"), preferences: preferences)
+        await model.refresh()
+        try fixture.write(returningState(status: "connecting"), to: "connect-response.json")
+        model.connectWhatsApp()
+        try await waitUntil { !model.busy && fixture.exists("connect-requested") }
+        try fixture.write(returningState(), to: "state.json")
+        await model.refresh()
+        XCTAssertEqual(model.page, .home)
+        await model.stop()
+        let (reopened, _) = try makeModel(state: returningState(), preferences: preferences)
+        await reopened.refresh()
+        XCTAssertEqual(reopened.page, .home)
+    }
+
+    func testFailedRepeatedScopeSaveKeepsChooserAndProgress() async throws {
+        let preferences = try makePreferences()
+        let (model, fixture) = try await makeRelinkedModel(preferences: preferences)
+        model.selection.selectedIDs = ["family"]
+        try fixture.write(["error": "Synthetic scope save failed"], to: "scope-failure.json")
+        model.saveScope(all: false)
+        try await waitUntil { !model.busy && model.error != nil }
+        XCTAssertEqual(model.page, .chats)
+        XCTAssertEqual(model.selection.selectedIDs, ["family"])
+        XCTAssertEqual(model.state.scope.chatIDs, ["team"])
+        await model.stop()
+        let (reopened, _) = try makeModel(state: returningState(), preferences: preferences)
+        await reopened.refresh()
+        XCTAssertEqual(reopened.page, .chats)
+    }
+
+    func testRepeatedScopeSavePreservesNavigationAndResumesAgentStepLater() async throws {
+        let preferences = try makePreferences()
+        let (model, fixture) = try await makeRelinkedModel(preferences: preferences)
+        try fixture.write(returningState(), to: "scope-response.json")
+        try fixture.hold("scope")
+        model.saveScope(all: false)
+        try await waitUntil { fixture.exists("scope-requested") }
+        model.page = .settings
+        fixture.release("scope")
+        try await waitUntil { !model.busy }
+        XCTAssertEqual(model.page, .settings)
+        await model.stop()
+        let (reopened, _) = try makeModel(state: returningState(), preferences: preferences)
+        await reopened.refresh()
+        XCTAssertEqual(reopened.page, .pairing)
+    }
+
+    func testReopenedChooserStillContinuesToInstructionsAfterEarlierSaveFinishes() async throws {
+        let (model, fixture) = try await makeRelinkedModel(preferences: makePreferences())
+        try fixture.write(returningState(), to: "scope-response.json")
+        try fixture.hold("scope")
+        model.saveScope(all: false)
+        try await waitUntil { fixture.exists("scope-requested") }
+        model.page = .home
+        model.editChats()
+        model.selection.selectedIDs = ["family"]
+        model.selection.query = "Family"
+        fixture.release("scope")
+        try await waitUntil { !model.busy }
+        XCTAssertEqual(model.page, .chats)
+        XCTAssertEqual(model.selection.selectedIDs, ["family"])
+        XCTAssertEqual(model.selection.query, "Family")
+
+        var saved = returningState()
+        saved["scope"] = ["mode": "selected", "chat_ids": ["family"]]
+        try fixture.write(saved, to: "scope-response.json")
+        model.saveScope(all: false)
+        try await waitUntil { !model.busy && model.state.scope.chatIDs == ["family"] }
+        XCTAssertEqual(model.page, .pairing)
+    }
+
+    func testDemoDoesNotReadOrClearSavedReconnectProgress() async throws {
+        let preferences = try makePreferences()
+        let (model, fixture) = try await makeRelinkedModel(preferences: preferences)
+        try fixture.write(returningState(), to: "scope-response.json")
+        model.saveScope(all: false)
+        try await waitUntil { !model.busy && model.page == .pairing }
+        await model.stop()
+        let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-ReconnectDemo-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let demo = AppModel(environment: ["LWMCP_DEMO": "1"], pasteboard: pasteboard, preferences: preferences)
+        XCTAssertEqual(demo.page, .home)
+        demo.finishConnectionSetup()
+        let (reopened, _) = try makeModel(state: returningState(), preferences: preferences)
+        await reopened.refresh()
+        XCTAssertEqual(reopened.page, .pairing, "Finishing a demo must not clear saved setup progress")
+    }
+
     func testConnectedServiceNeedsNoSyncMetadata() async throws {
         let (model, _) = try makeModel(state: [
             "whatsapp": ["linked": true, "status": "connected"],
@@ -47,6 +353,7 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertFalse(model.canCreateConnection)
         fixture.release("catalog")
         await refresh.value
+        try await waitUntil { !model.catalogPending }
         XCTAssertFalse(model.catalogPending)
         XCTAssertEqual(Set(model.selection.chats.map(\.id)), ["team", "family"])
 
@@ -110,6 +417,7 @@ final class OnboardingFlowTests: XCTestCase {
 
         try fixture.write(serviceState(), to: "state.json")
         await model.refresh()
+        try await waitUntil { model.page == .chats }
         XCTAssertEqual(model.page, .chats)
         XCTAssertTrue(model.whatsappLinked)
         XCTAssertFalse(model.canCreateConnection, "Relinking must still require the initial chat-scope confirmation")
@@ -147,6 +455,7 @@ final class OnboardingFlowTests: XCTestCase {
         await model.refresh()
         try fixture.write(serviceState(), to: "state.json")
         await model.refresh()
+        try await waitUntil { model.page == .chats && !model.catalogPending }
         XCTAssertEqual(model.page, .chats)
 
         try fixture.write(serviceState(status: "connecting"), to: "state.json")
@@ -514,6 +823,25 @@ final class OnboardingFlowTests: XCTestCase {
         throw FixtureFailure.timedOut
     }
 
+    private func makeRelinkedModel(preferences: UserDefaults) async throws -> (AppModel, ServiceFixture) {
+        let (model, fixture) = try makeModel(state: returningState(linked: false, status: "disconnected"), preferences: preferences)
+        await model.refresh()
+        try fixture.write(returningState(linked: false, status: "linking", qr: "SYNTHETIC-RETURNING-QR"), to: "connect-response.json")
+        model.connectWhatsApp()
+        try await waitUntil { !model.busy && fixture.exists("connect-requested") }
+        try fixture.write(returningState(), to: "state.json")
+        await model.refresh()
+        try await waitUntil { model.page == .chats && !model.catalogPending }
+        XCTAssertEqual(model.page, .chats)
+        return (model, fixture)
+    }
+
+    private func returningState(linked: Bool = true, status: String = "ready", qr: String? = nil) -> [String: Any] {
+        var response = serviceState(linked: linked, status: status, scope: "selected", chatIDs: ["team"], qr: qr)
+        response["agents"] = [["id": "saved-agent", "name": "Connection 1", "send_enabled": true]]
+        return response
+    }
+
     private func serviceState(linked: Bool = true, status: String = "ready", scope: String = "initial", chatIDs: [String] = [], detail: String? = nil, qr: String? = nil) -> [String: Any] {
         var whatsapp: [String: Any] = ["linked": linked, "status": status]
         if let detail { whatsapp["detail"] = detail }
@@ -524,10 +852,18 @@ final class OnboardingFlowTests: XCTestCase {
          "mcp": ["url": "http://127.0.0.1:32191/mcp", "status": scope == "initial" ? "setup_required" : "ready"]]
     }
 
-    private func makeModel(state: [String: Any]? = nil) throws -> (AppModel, ServiceFixture) {
+    private func makePreferences() throws -> UserDefaults {
+        let name = "LocalWhatsAppMCP-OnboardingTests-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: name))
+        addTeardownBlock { preferences.removePersistentDomain(forName: name) }
+        return preferences
+    }
+
+    private func makeModel(state: [String: Any]? = nil, preferences: UserDefaults? = nil) throws -> (AppModel, ServiceFixture) {
         let fixture = try ServiceFixture(state: state ?? serviceState())
         let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-OnboardingTests-\(UUID().uuidString)"))
-        let model = AppModel(environment: [:], pasteboard: pasteboard, runtime: fixture.runtime)
+        let preferences = try preferences ?? makePreferences()
+        let model = AppModel(environment: [:], pasteboard: pasteboard, runtime: fixture.runtime, preferences: preferences)
         addTeardownBlock { @MainActor in
             fixture.release("scope")
             fixture.release("catalog")

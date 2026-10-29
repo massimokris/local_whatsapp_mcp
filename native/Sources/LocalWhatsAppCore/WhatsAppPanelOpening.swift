@@ -16,7 +16,7 @@ public enum WhatsAppPanelOpening: Equatable {
         } else if !foregroundOpen {
             self = .keepCurrentPage
         } else {
-            let linking = ["connecting", "linking"].contains(state.status ?? "")
+            let linking = ["connecting", "linking", "logging_in"].contains(state.status ?? "")
             let needsFreshCode = ["attention", "error", "failed"].contains(state.status ?? "") || (state.qr?.isEmpty ?? true)
             self = .qr(startConnection: !linking && needsFreshCode)
         }

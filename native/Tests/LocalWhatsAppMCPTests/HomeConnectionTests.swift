@@ -175,10 +175,13 @@ final class HomeConnectionTests: XCTestCase {
     private func makeLiveModel() async throws -> (AppModel, HomeCredentialsFixture) {
         let fixture = try HomeCredentialsFixture()
         let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-HomeTests-\(UUID().uuidString)"))
-        let model = AppModel(environment: [:], pasteboard: pasteboard, runtime: fixture.runtime)
+        let preferencesName = "LocalWhatsAppMCP-HomeTests-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: preferencesName))
+        let model = AppModel(environment: [:], pasteboard: pasteboard, runtime: fixture.runtime, preferences: preferences)
         addTeardownBlock { @MainActor in
             fixture.releaseCredentials()
             await model.stop()
+            preferences.removePersistentDomain(forName: preferencesName)
             pasteboard.releaseGlobally()
             try? FileManager.default.removeItem(at: fixture.directory)
         }

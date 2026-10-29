@@ -6,11 +6,14 @@ import ServiceManagement
 @MainActor
 final class AppModel: ObservableObject {
     enum Page: String { case home, qr, chats, mcp, pairing, settings }
+    private enum ReconnectSetupStep: String { case chats, agent }
+    private static let reconnectSetupKey = "whatsappReconnectSetupStep"
     @Published var state = ServiceState()
     @Published var page: Page = .home {
         didSet {
             pendingPanelOpen = false
             if oldValue != page {
+                clearQRFeedback()
                 navigationRevision += 1
                 clearInvitation()
                 clearConnectionCredentials()
@@ -43,7 +46,17 @@ final class AppModel: ObservableObject {
     let isDemo: Bool
     let runtime: HelperRuntime
     private let pasteboard: NSPasteboard
+    private let preferences: UserDefaults
+    private var reconnectSetupStep: ReconnectSetupStep? {
+        didSet {
+            guard !isDemo else { return }
+            preferences.set(reconnectSetupStep?.rawValue, forKey: Self.reconnectSetupKey)
+        }
+    }
     private var polling: Task<Void, Never>?
+    private var qrLinkInProgress = false
+    private var qrSuccessDelay: Task<Void, Never>?
+    private var qrSuccessDelayElapsed = false
     private var refreshing = false
     private var stateRevision = 0
     private var stopping = false
@@ -59,19 +72,22 @@ final class AppModel: ObservableObject {
     private var setupManualConnectionID: String?
     private var setupGeneration = 0
 
-    init(environment: [String: String] = ProcessInfo.processInfo.environment, pasteboard: NSPasteboard = .general, runtime: HelperRuntime? = nil) {
+    init(environment: [String: String] = ProcessInfo.processInfo.environment, pasteboard: NSPasteboard = .general, runtime: HelperRuntime? = nil, preferences: UserDefaults = .standard) {
         self.pasteboard = pasteboard
+        self.preferences = preferences
         isDemo = CommandLine.arguments.contains("--demo") || environment["LWMCP_DEMO"] == "1"
         let helpers = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers")
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         self.runtime = runtime ?? HelperRuntime(helper: helpers.appendingPathComponent("localwhatsappmcp"), wacli: helpers.appendingPathComponent("wacli"), dataDirectory: applicationSupport.appendingPathComponent("LocalWhatsAppMCP"))
         if isDemo { loadDemo(page: environment["LWMCP_DEMO_PAGE"]) }
+        else { reconnectSetupStep = preferences.string(forKey: Self.reconnectSetupKey).flatMap(ReconnectSetupStep.init(rawValue:)) }
     }
     var whatsappLinked: Bool { state.whatsapp.isLinked }
     var whatsappConnected: Bool { state.whatsapp.isConnected }
+    var whatsappLoggingIn: Bool { state.whatsapp.status == "logging_in" }
     var whatsappNeedsReconnect: Bool {
         !whatsappDisconnectPending && !whatsappDisconnecting && (["attention", "error", "failed"].contains(state.whatsapp.status ?? "") ||
-            (state.whatsapp.linked == true && !whatsappConnected && !["connecting", "linking"].contains(state.whatsapp.status ?? "")))
+            (state.whatsapp.linked == true && !whatsappConnected && !["connecting", "linking", "logging_in"].contains(state.whatsapp.status ?? "")))
     }
     var whatsappDisconnectPending: Bool { state.whatsapp.disconnectPending == true }
     var whatsappDisconnecting: Bool { disconnectRequested || state.whatsapp.status == "disconnecting" }
@@ -84,6 +100,7 @@ final class AppModel: ObservableObject {
         if whatsappConnected { return "Connected to this Mac" }
         switch state.whatsapp.status {
         case "linking": return "Waiting for your phone"
+        case "logging_in": return "Connecting…"
         case "connecting": return whatsappLinked ? "Reconnecting…" : "Connecting…"
         case "disconnecting": return "Disconnecting…"
         case "attention", "error", "failed": return "Needs attention"
@@ -123,6 +140,7 @@ final class AppModel: ObservableObject {
         Task { await refresh() }
     }
     func panelClosed() {
+        clearQRFeedback()
         clearInvitation()
         clearConnectionCredentials()
         showingManualSetup = false
@@ -135,7 +153,7 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self, !self.stopping else { return }
                 await self.refresh()
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(nanoseconds: self.page == .qr ? 500_000_000 : 2_000_000_000)
             }
         }
     }
@@ -144,6 +162,7 @@ final class AppModel: ObservableObject {
         guard !isDemo, !refreshing, !busy, !stopping else { return }
         refreshing = true
         let refreshRevision = stateRevision
+        let refreshNavigationRevision = navigationRevision
         var receivedState = false
         defer { refreshing = false; ensureExpandedConnectionCredentials() }
         do {
@@ -158,8 +177,8 @@ final class AppModel: ObservableObject {
             reconcileConnections()
             if !didLoad { selection.selectedIDs = Set(latest.scope.chatIDs); didLoad = true }
             if error?.hasPrefix("Connecting to WhatsApp.") == true { error = nil }
-            resolvePanelOpening(resumeInitialSetup: resumeInitialSetup)
-            if page == .chats || (whatsappLinked && Date().timeIntervalSince(lastCatalogRefresh) > 15) {
+            if refreshNavigationRevision == navigationRevision { resolvePanelOpening(resumeInitialSetup: resumeInitialSetup) }
+            if page == .chats || (page != .qr && whatsappLinked && Date().timeIntervalSince(lastCatalogRefresh) > 15) {
                 let catalog = try await runtime.control(method: "GET", path: "/catalog")
                 guard refreshRevision == stateRevision else { return }
                 selection.chats = try JSONDecoder().decode(Catalog.self, from: catalog).chats
@@ -172,6 +191,7 @@ final class AppModel: ObservableObject {
                 serviceAvailable = false
             }
             if !busy && refreshRevision == stateRevision { self.error = "Connecting to WhatsApp. \(error.localizedDescription)" }
+            if refreshRevision == stateRevision { clearQRFeedback() }
         }
     }
     func reconcileConnections() {
@@ -197,6 +217,8 @@ final class AppModel: ObservableObject {
         ensureExpandedConnectionCredentials()
     }
     private func resolvePanelOpening(resumeInitialSetup: Bool = false) {
+        guard !stopping else { return }
+        if holdQRSuccess() { pendingPanelOpen = false; return }
         let destination = whatsappDisconnecting && (pendingPanelOpen || page == .qr)
             ? WhatsAppPanelOpening.home
             : WhatsAppPanelOpening(state: state.whatsapp, currentPageIsQR: page == .qr, foregroundOpen: pendingPanelOpen)
@@ -207,32 +229,88 @@ final class AppModel: ObservableObject {
         case .keepCurrentPage:
             // Resume unfinished chat selection once on launch. Later polls and
             // window reopens must respect an explicit exit or another page.
-            if resumeInitialSetup, page == .home, needsInitialChatSelection { editChats() }
+            if resumeInitialSetup, page == .home {
+                if needsInitialChatSelection { editChats() }
+                else if needsAgentSetup { beginPairing() }
+            }
         case .home:
             if page == .qr, needsInitialChatSelection { editChats() }
+            else if page == .qr, needsAgentSetup { beginPairing() }
             else { page = .home }
         case .qr(let startConnection):
             page = .qr
             if startConnection { connectWhatsApp() }
         }
     }
+    private func holdQRSuccess() -> Bool {
+        guard page == .qr else { return false }
+        guard serviceAvailable, connectionError == nil, !whatsappDisconnectPending, !whatsappDisconnecting else {
+            clearQRFeedback()
+            return false
+        }
+        if !whatsappLinked {
+            clearQRFeedback()
+            qrLinkInProgress = ["connecting", "linking", "logging_in"].contains(state.whatsapp.status ?? "")
+            return false
+        }
+        guard qrLinkInProgress else { return false }
+        guard ["ready", "connected"].contains(state.whatsapp.status ?? "") else {
+            clearQRFeedback()
+            return false
+        }
+        if qrSuccessDelayElapsed { return false }
+        if qrSuccessDelay == nil {
+            qrSuccessDelay = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 800_000_000) } catch { return }
+                guard !Task.isCancelled, let self, !self.stopping, self.page == .qr else { return }
+                self.qrSuccessDelayElapsed = true
+                // Advance only from another successful service response. A
+                // vanished service or a later logout must keep its error visible.
+                await self.refresh()
+            }
+        }
+        return true
+    }
+    private func clearQRFeedback() {
+        qrSuccessDelay?.cancel()
+        qrSuccessDelay = nil
+        qrSuccessDelayElapsed = false
+        qrLinkInProgress = false
+    }
     private var needsInitialChatSelection: Bool {
-        whatsappLinked && !state.scope.isConfirmed && !whatsappDisconnectPending && !whatsappDisconnecting
+        whatsappLinked && (!state.scope.isConfirmed || reconnectSetupStep == .chats) && !whatsappDisconnectPending && !whatsappDisconnecting
+    }
+    private var needsAgentSetup: Bool {
+        whatsappLinked && reconnectSetupStep == .agent && !whatsappDisconnectPending && !whatsappDisconnecting
+    }
+    private func prepareReconnectSetup() {
+        guard !whatsappLinked, state.scope.isConfirmed, !whatsappDisconnectPending, !whatsappDisconnecting else { return }
+        reconnectSetupStep = .chats
     }
     func showConnection() {
         page = .qr
-        if !whatsappConnected && (state.whatsapp.qr == nil || whatsappNeedsReconnect) { connectWhatsApp() }
+        if !whatsappConnected && !whatsappLoggingIn && (state.whatsapp.qr == nil || whatsappNeedsReconnect) { connectWhatsApp() }
     }
     func connectWhatsApp() {
+        guard !busy, !whatsappDisconnecting, !whatsappDisconnectPending else { return }
+        // Only an observed unlinked account starts setup again. Saved scope and
+        // agent authorization remain unchanged while the user confirms choices.
+        if isDemo || (serviceAvailable && didLoad) { prepareReconnectSetup() }
+        clearQRFeedback()
         page = .qr
+        qrLinkInProgress = !whatsappLinked
         if isDemo {
             state.whatsapp = .init(status: "linking", qr: "LOCALWHATSAPPMCP-DEMO-NOT-A-PAIRING-CODE")
             return
         }
-        mutate(method: "POST", path: "/whatsapp/connect", body: [:])
+        mutate(method: "POST", path: "/whatsapp/connect", body: [:], completion: {
+            // A successful QR response also covers Connect before the first poll.
+            self.prepareReconnectSetup()
+        })
     }
     func disconnectWhatsApp() {
         guard !busy, !whatsappDisconnecting else { return }
+        clearQRFeedback()
         if isDemo {
             state.whatsapp = .init(status: "disconnected", linked: false)
             state.error = nil
@@ -253,12 +331,16 @@ final class AppModel: ObservableObject {
     func saveScope(all: Bool) {
         guard !busy else { return }
         let initialConfirmation = !state.scope.isConfirmed
+        let repeatingSetup = reconnectSetupStep != nil
         let navigation = navigationRevision
         let continueSetup = {
             // Saving may finish after the user leaves, including leaving and
             // reopening the selector. Persist scope without replacing that route.
-            guard !self.stopping, self.navigationRevision == navigation, self.state.scope.isConfirmed else { return }
-            self.page = initialConfirmation ? .mcp : .home
+            guard self.state.scope.isConfirmed else { return }
+            if repeatingSetup { self.reconnectSetupStep = .agent }
+            guard !self.stopping, self.navigationRevision == navigation else { return }
+            if repeatingSetup { self.beginPairing() }
+            else { self.page = initialConfirmation ? .mcp : .home }
         }
         if isDemo {
             state.scope = Scope(mode: all ? "all" : "selected", chatIDs: all ? [] : selection.selectedIDs.sorted())
@@ -293,6 +375,7 @@ final class AppModel: ObservableObject {
         error = nil
     }
     func finishConnectionSetup() {
+        reconnectSetupStep = nil
         setupGeneration += 1
         clearInvitation()
         clearConnectionCredentials()
@@ -508,6 +591,7 @@ final class AppModel: ObservableObject {
     func stop() async {
         stopping = true
         polling?.cancel()
+        clearQRFeedback()
         clearInvitation()
         clearConnectionCredentials()
         if !isDemo { await runtime.stop() }
@@ -516,7 +600,7 @@ final class AppModel: ObservableObject {
         if isDemo { loginEnabled = enabled; return }
         do {
             if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-            UserDefaults.standard.set(true, forKey: "loginConfigured")
+            preferences.set(true, forKey: "loginConfigured")
             loginEnabled = SMAppService.mainApp.status == .enabled
             loginMessage = SMAppService.mainApp.status == .requiresApproval ? "Allow LocalWhatsAppMCP in System Settings → Login Items." : nil
         } catch { loginMessage = "Start at Log In: \(error.localizedDescription)" }
@@ -524,7 +608,7 @@ final class AppModel: ObservableObject {
     func openLoginSettings() { SMAppService.openSystemSettingsLoginItems() }
     private func configureLogin() {
         loginEnabled = SMAppService.mainApp.status == .enabled
-        if !UserDefaults.standard.bool(forKey: "loginConfigured") { setLogin(true) }
+        if !preferences.bool(forKey: "loginConfigured") { setLogin(true) }
         else if SMAppService.mainApp.status == .requiresApproval { loginMessage = "Allow LocalWhatsAppMCP in System Settings → Login Items." }
     }
     private func mutate(method: String, path: String, body: [String: Any]? = nil, finished: (() -> Void)? = nil, completion: (() -> Void)? = nil) {
@@ -555,6 +639,7 @@ final class AppModel: ObservableObject {
                 completion?()
             } catch {
                 self.error = error.localizedDescription
+                clearQRFeedback()
                 refreshAfterFailure = true
             }
         }
@@ -596,6 +681,10 @@ final class AppModel: ObservableObject {
         case "qr", "qr-hover", "loading":
             state = ServiceState(whatsapp: .init(status: "linking", qr: page == "loading" ? nil : "LOCALWHATSAPPMCP-DEMO-NOT-A-PAIRING-CODE"))
             self.page = .qr
+        case "qr-connecting":
+            state = ServiceState(whatsapp: .init(status: "logging_in", qr: "LOCALWHATSAPPMCP-DEMO-NOT-A-PAIRING-CODE", linked: false))
+            self.page = .qr
+        case "qr-success": self.page = .qr
         case "qr-error":
             state.whatsapp = .init(status: "attention", detail: "The connection was interrupted. Try again for a new QR code.", qr: "LOCALWHATSAPPMCP-DEMO-NOT-A-PAIRING-CODE")
             self.page = .qr
