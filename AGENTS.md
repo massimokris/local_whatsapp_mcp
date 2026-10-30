@@ -38,6 +38,7 @@ Setup follows **Link WhatsApp → Choose chats → Connect your agent**. Preserv
 | [engine](backend/internal/engine) | wacli process supervision and archive adapter. |
 | [vendor/wacli](vendor/wacli) | Upstream pin, integration patch and engine build scripts. |
 | [scripts](scripts), [packaging](packaging) | Tests, app assembly, signing and distribution. |
+| [landing](landing) | Independent Next.js landing page and direct app download, deployable to Vercel. |
 
 ## Read before changing
 
@@ -46,7 +47,8 @@ Setup follows **Link WhatsApp → Choose chats → Connect your agent**. Preserv
 | Product behavior or chat scope | [Decision map](docs/wayfinder/map.md) for accepted decisions and revisions, and [component interfaces](docs/implementation/interfaces.md) for current contracts. |
 | Domain terminology | [CONTEXT.md](CONTEXT.md) for WhatsApp linking, agent pairing, chat scope and archive contents. |
 | Service integration or engine behavior | [Component interfaces](docs/implementation/interfaces.md) for ownership and contracts; [engine guide](vendor/wacli/README.md) for the upstream boundary. |
-| UI, copy or accessibility | [Native guide](native/README.md) for safe previews and the native views above for existing patterns. |
+| Native UI, copy or accessibility | [Native guide](native/README.md) for safe previews and the native views above for existing patterns. |
+| Landing page, download link or web deployment | [Landing guide](landing/README.md) for local commands, form behavior, assets and Vercel setup. |
 | Ingestion or archive access | [Selective-storage research](docs/research/selective-storage.md) for insertion points and policy coverage. |
 | MCP authentication, agent setup or ngrok | [Component interfaces](docs/implementation/interfaces.md#local-mcp-boundary) for current access and URL rules; [agent-pairing research](docs/research/agent-pairing.md) for historical client-capability evidence. |
 | Planning or ticket status | [Tracker operations](docs/agents/issue-tracker.md) and the relevant decision or implementation ticket. |

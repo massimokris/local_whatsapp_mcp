@@ -64,6 +64,7 @@ native/
   Sources/LocalWhatsAppCore/  # State models, chat selection and helper runtime
   Tests/                     # Native flow and core tests
 backend/                     # Go MCP service, access policy and engine adapter
+landing/                     # Independent Next.js landing page for Vercel
 vendor/wacli/                # Pinned engine, integration patch and build scripts
 packaging/                   # Bundle metadata, app icon and third-party notices
 scripts/                     # Build, test, package and verify the app
@@ -72,6 +73,8 @@ CONTEXT.md                   # Domain terms
 AGENTS.md                    # Shared instructions for coding agents
 CLAUDE.md                    # Claude Code entry point
 ```
+
+See the [landing guide](landing/README.md) to run the website locally or deploy it to Vercel.
 
 ## Contributing
 
