@@ -111,7 +111,11 @@ export async function POST(request: Request) {
     client.on("error", () => {});
     await client.connect();
     await client.query(
-      "INSERT INTO public.waitlist_signups (email, locale, source) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+      `INSERT INTO public.waitlist_signups AS signups (email, locale, source)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (email) DO UPDATE
+       SET source = concat_ws(',', nullif(signups.source, ''), EXCLUDED.source)
+       WHERE NOT (EXCLUDED.source = ANY(string_to_array(signups.source, ',')))`,
       [email, "en", "landing_localwhatsappmcp"],
     );
   } catch {

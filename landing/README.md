@@ -23,7 +23,7 @@ npm start
 
 Fonts use `next/font/google`: the build needs access to Google Fonts, then serves the downloaded fonts with the site.
 
-Set `DATABASE_URL` in `.env.local` to the same server-only connection string used by the keyboard landing. This uses its existing `public.waitlist_signups` table and insert-only `waitlist_writer` user; no new table or migration is needed. The page and production build work without this setting, but signup submissions show a retryable error until storage is configured.
+Set `DATABASE_URL` in `.env.local` to the same server-only connection string used by the keyboard landing. This uses its existing `public.waitlist_signups` table; no table structure change is needed. The page and production build work without this setting, but signup submissions show a retryable error until storage is configured.
 
 ## Deploy to Vercel
 
@@ -31,13 +31,15 @@ Import this repository as a Vercel project. Set **Root Directory** to `landing`,
 
 Set Vercel's server-only `DATABASE_URL` to the same value as the keyboard landing before deploying. Preserve its direct PostgreSQL connection and TLS settings. Do not prefix this variable with `NEXT_PUBLIC_`; database credentials must stay on the server. For preview testing, use a separate test database with the same table structure.
 
+If the shared connection uses the original insert-only `waitlist_writer`, run [db/append-source-permissions.sql](db/append-source-permissions.sql) as the table owner before deploying either landing. It adds `SELECT (email, source)`, `UPDATE (source)`, and the corresponding row-level security policies, retaining the existing insert permissions. This script is safe to rerun and is only needed once for the shared database. A connection that already has these permissions does not need it.
+
 Open Graph and X/Twitter previews use the existing `/setup.gif`. Absolute image URLs use `SITE_URL` when set (a full public origin such as `https://your-domain.com`), otherwise Vercel's production domain, its deployment domain, or localhost during local development. Set `SITE_URL` at build time to use a custom domain. Preview services decide whether to animate the GIF or display a still frame.
 
 ## Signup list
 
-[app/api/signups/route.ts](app/api/signups/route.ts) uses the same storage contract as the keyboard landing: a direct PostgreSQL connection per submission and `INSERT INTO public.waitlist_signups (email, locale, source) ... ON CONFLICT DO NOTHING`. Emails are trimmed and lowercased. This English page always writes `locale = 'en'` and `source = 'landing_localwhatsappmcp'` on the server; request fields cannot override them. No emails are sent.
+[app/api/signups/route.ts](app/api/signups/route.ts) uses the same storage contract as the keyboard landing: a direct PostgreSQL connection per submission and an atomic `INSERT ... ON CONFLICT (email) DO UPDATE`. Emails are trimmed and lowercased. This English page always supplies `locale = 'en'` and `source = 'landing_localwhatsappmcp'` on the server; request fields cannot override them. No emails are sent.
 
-The shared table is unique by email. An address already registered through either landing succeeds without inserting a duplicate or changing the existing row's source, locale or timestamp, matching the keyboard landing's behavior. [db/schema.sql](db/schema.sql) documents the compatible table structure for local tests; production reuses the existing table, grants and row-level security policy.
+The shared table is unique by email. For an existing address, the handler appends its source only if that complete comma-separated label is missing: `landing` becomes `landing,landing_localwhatsappmcp`. Repeated or simultaneous submissions do not add duplicate sources. The existing ID, locale and signup timestamp are preserved. The keyboard landing follows the same behavior, so attribution accumulates whichever page is visited first. [db/schema.sql](db/schema.sql) documents the compatible table structure for local tests.
 
 The browser starts the DMG download only after the database confirms the write. If storage is unavailable, it preserves the entered email and offers a retry. The standard HTML form also supports a POST-and-redirect download without JavaScript. Email addresses are sent in the request body, never the download URL. There is no public endpoint for reading the signup list.
 
@@ -46,13 +48,13 @@ Read the list in your database provider's SQL editor:
 ```sql
 select email, locale, source, created_at
 from public.waitlist_signups
-where source = 'landing_localwhatsappmcp'
+where 'landing_localwhatsappmcp' = any(string_to_array(source, ','))
 order by created_at desc;
 ```
 
 ## Verify signup storage
 
-Run `npm test` from `landing/` with PostgreSQL's `initdb` and `pg_ctl` available on `PATH`. The test builds the app, creates a disposable local database and server, and checks validation, source attribution, shared-table duplicates, the standard form redirect, and database failures. Requests use an insert-only role with row-level security, matching the existing table's access contract. The test uses synthetic emails, ignores any configured production `DATABASE_URL`, and removes its temporary database when finished.
+Run `npm test` from `landing/` with PostgreSQL's `initdb` and `pg_ctl` available on `PATH`. The test builds the app, creates a disposable local database and server, and checks validation, source appending, repeated and simultaneous signups, unchanged existing metadata, the standard form redirect, and database failures. Requests use a restricted writer with row-level security and the permission update above; it cannot change other existing columns. The test uses synthetic emails, ignores any configured production `DATABASE_URL`, and removes its temporary database when finished.
 
 ## Content and downloads
 

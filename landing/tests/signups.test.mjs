@@ -78,6 +78,15 @@ test("email signups persist before the app download", { timeout: 60_000 }, async
   assert.equal((await database.query(
     "SELECT has_table_privilege('waitlist_writer', 'public.waitlist_signups', 'SELECT') AS can_read",
   )).rows[0].can_read, false);
+  await database.query(await readFile(join(landing, "db/append-source-permissions.sql"), "utf8"));
+  assert.deepEqual((await database.query(`SELECT
+    has_column_privilege('waitlist_writer', 'public.waitlist_signups', 'source', 'UPDATE') AS can_update_source,
+    has_column_privilege('waitlist_writer', 'public.waitlist_signups', 'locale', 'UPDATE') AS can_update_locale,
+    has_column_privilege('waitlist_writer', 'public.waitlist_signups', 'email', 'SELECT') AS can_read_email,
+    has_column_privilege('waitlist_writer', 'public.waitlist_signups', 'locale', 'SELECT') AS can_read_locale
+  `)).rows[0], {
+    can_update_source: true, can_update_locale: false, can_read_email: true, can_read_locale: false,
+  });
 
   const port = await freePort();
   const origin = `http://127.0.0.1:${port}`;
@@ -159,20 +168,56 @@ test("email signups persist before the app download", { timeout: 60_000 }, async
     )).rows, [{ email: "nojs.signup@example.com", locale: "en", source: "landing_localwhatsappmcp" }]);
   });
 
-  await t.test("preserves an existing signup from the reference landing", async () => {
+  await t.test("appends this source once to an existing keyboard signup and preserves other fields", async () => {
     const existing = await database.query(
       `INSERT INTO public.waitlist_signups (email, locale, source, created_at)
        VALUES ($1, $2, $3, $4) RETURNING id, email, locale, source, created_at`,
       ["existing.user@example.com", "es", "landing", "2025-01-02T03:04:05.000Z"],
     );
-    const response = await post(JSON.stringify({ email: "  Existing.User@Example.com  " }));
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { ok: true, downloadUrl });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await post(JSON.stringify({ email: "  Existing.User@Example.com  " }));
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { ok: true, downloadUrl });
+    }
     const after = await database.query(
       "SELECT id, email, locale, source, created_at FROM public.waitlist_signups WHERE email = $1",
       ["existing.user@example.com"],
     );
-    assert.deepEqual(after.rows, existing.rows);
+    assert.deepEqual(after.rows, [{ ...existing.rows[0], source: "landing,landing_localwhatsappmcp" }]);
+  });
+
+  await t.test("matches complete source labels anywhere in the list and handles an empty source", async () => {
+    const cases = [
+      ["landing_localwhatsappmcp,landing", "landing_localwhatsappmcp,landing"],
+      ["newsletter,landing_localwhatsappmcp,landing", "newsletter,landing_localwhatsappmcp,landing"],
+      ["landing_localwhatsappmcp_extra", "landing_localwhatsappmcp_extra,landing_localwhatsappmcp"],
+      ["", "landing_localwhatsappmcp"],
+    ];
+    for (const [index, [source, expected]] of cases.entries()) {
+      const email = `source-case-${index}@example.com`;
+      await database.query("INSERT INTO public.waitlist_signups (email, source) VALUES ($1, $2)", [email, source]);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        assert.equal((await post(JSON.stringify({ email }))).status, 200);
+      }
+      assert.deepEqual((await database.query(
+        "SELECT source FROM public.waitlist_signups WHERE email = $1", [email],
+      )).rows, [{ source: expected }]);
+    }
+  });
+
+  await t.test("concurrent repeat submissions append one source and preserve existing attribution", async () => {
+    const email = "concurrent.signup@example.com";
+    await database.query(
+      "INSERT INTO public.waitlist_signups (email, source) VALUES ($1, $2)", [email, "newsletter,landing"],
+    );
+    const responses = await Promise.all(Array.from({ length: 8 }, () => post(JSON.stringify({ email }))));
+    for (const response of responses) {
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { ok: true, downloadUrl });
+    }
+    assert.deepEqual((await database.query(
+      "SELECT source FROM public.waitlist_signups WHERE email = $1", [email],
+    )).rows, [{ source: "newsletter,landing,landing_localwhatsappmcp" }]);
   });
 
   await t.test("does not offer a download when storage is unavailable", async () => {
