@@ -31,6 +31,8 @@ Import this repository as a Vercel project. Set **Root Directory** to `landing`,
 
 Set Vercel's server-only `DATABASE_URL` to the same value as the keyboard landing before deploying. Preserve its direct PostgreSQL connection and TLS settings. Do not prefix this variable with `NEXT_PUBLIC_`; database credentials must stay on the server. For preview testing, use a separate test database with the same table structure.
 
+Open Graph and X/Twitter previews use the existing `/setup.gif`. Absolute image URLs use `SITE_URL` when set (a full public origin such as `https://your-domain.com`), otherwise Vercel's production domain, its deployment domain, or localhost during local development. Set `SITE_URL` at build time to use a custom domain. Preview services decide whether to animate the GIF or display a still frame.
+
 ## Signup list
 
 [app/api/signups/route.ts](app/api/signups/route.ts) uses the same storage contract as the keyboard landing: a direct PostgreSQL connection per submission and `INSERT INTO public.waitlist_signups (email, locale, source) ... ON CONFLICT DO NOTHING`. Emails are trimmed and lowercased. This English page always writes `locale = 'en'` and `source = 'landing_localwhatsappmcp'` on the server; request fields cannot override them. No emails are sent.
