@@ -863,7 +863,7 @@ final class OnboardingFlowTests: XCTestCase {
         let fixture = try ServiceFixture(state: state ?? serviceState())
         let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-OnboardingTests-\(UUID().uuidString)"))
         let preferences = try preferences ?? makePreferences()
-        let model = AppModel(environment: [:], pasteboard: pasteboard, runtime: fixture.runtime, preferences: preferences)
+        let model = AppModel(environment: [:], pasteboard: pasteboard, runtime: fixture.runtime, preferences: preferences, presence: FakePresence(result: true))
         addTeardownBlock { @MainActor in
             fixture.release("scope")
             fixture.release("catalog")

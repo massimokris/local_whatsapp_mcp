@@ -44,7 +44,7 @@ Supported ngrok hosts are allowed automatically; there is no app-side tunnel con
 
 **Message sending** starts off for each connection. Expand its card under **Local MCP** and enable **Allow message sending** when you want that agent to send messages.
 
-Sending permission, chat scope and connections change only through the app. Other local processes, including agents with shell access, cannot change them through the private control socket.
+Sending permission, chat scope and connections change only through the app. Other local processes, including agents with shell access, cannot change them through the private control socket. Enabling sending, sharing more chats, revealing a saved token or adding another connection asks for Touch ID or your Mac password.
 
 **Start at Log In** is optional and available in settings. macOS may ask you to approve it.
 

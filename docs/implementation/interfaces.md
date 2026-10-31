@@ -16,6 +16,18 @@ Native app launches `localwhatsappmcp serve --owner-stdin --data-dir DIR --wacli
 
 Private control requires the current app session token. On every service start the app generates 32 random bytes, encoded as unpadded base64url (43 characters), and writes the token plus a newline as the first line of the ownership pipe. The service reads that line within 10 seconds before it starts watching for EOF, and keeps the token only in memory. Without a valid token it does not create `control.sock` and reports `control_unavailable`. Every control socket request must carry the token in the `X-LWMCP-Control-Token` header; a missing or different value returns 401 without reaching the handler, and the rejection never echoes the received value. The `control` subcommand reads the token as the first line of stdin, followed by the optional JSON body. The token never appears in argv, the environment, files, logs, `/state` or stderr. A restarted service always receives a new token. Other processes of the same macOS user can therefore no longer change sending permission, chat scope or connections through the socket; the app remains the only caller.
 
+Actions that widen agent access also require the device owner's presence: Touch ID when available, otherwise the macOS login password, through `LocalAuthentication`'s `deviceOwnerAuthentication` policy. This covers agents that drive the app's own UI through accessibility or computer use. A denial, cancellation or unavailable policy sends no request, leaves state unchanged and shows "Confirmation canceled. Nothing changed." One confirmation covers further protected actions for 60 seconds; closing the panel or quitting clears it. Demo mode never prompts. There is no setting to disable the check, because a preference that any same-user process can rewrite would defeat it.
+
+| Action | Confirmation |
+| --- | --- |
+| Enable message sending for a connection | Always |
+| Disable message sending | Never |
+| First chat scope confirmation during setup | Never |
+| Save scope after setup | Only when it widens: moving to all chats, or selecting a chat outside the saved list. Narrowing never asks. Identity aliases can make a narrowing look wider, which only costs an extra confirmation. |
+| Reveal a saved connection token, including automatic loading when its card expands | Always. A denied automatic load is not retried by polling until the card is reopened. |
+| Create pairing instructions or a manual connection | Only when another connection already exists. The first connection during onboarding never asks. |
+| Delete a connection, disconnect WhatsApp, wake | Never |
+
 The service takes an exclusive `service.lock` in its data directory. Before publishing policy after a crash, startup also waits for the upstream writer lock; a stale lock file alone does not prove a writer is running. Only wacli writes its message/session databases; the service's direct SQL reads supply catalog metadata.
 
 Private endpoints:
