@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -55,20 +56,34 @@ func run(args []string) error {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		var controlToken string
 		if *ownerStdin {
-			go func() { _, _ = io.Copy(io.Discard, os.Stdin); cancel() }()
+			// The first line on the ownership pipe is the app session token.
+			// EOF detection must reuse this reader so buffered bytes are not lost.
+			reader := bufio.NewReaderSize(os.Stdin, 128)
+			token, err := readControlToken(reader, 10*time.Second)
+			if err != nil {
+				return fmt.Errorf("private app control socket could not be created: %w", err)
+			}
+			controlToken = token
+			go func() { _, _ = io.Copy(io.Discard, reader); cancel() }()
 		}
-		return serve(ctx, service.Options{DataDir: *dir}, *binary, *listen)
+		return serve(ctx, service.Options{DataDir: *dir}, *binary, *listen, controlToken)
 	case "control":
 		method := fs.String("method", "GET", "")
 		path := fs.String("path", "/state", "")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
+		// stdin: one session token line, then the optional JSON body.
+		reader := bufio.NewReaderSize(os.Stdin, 128)
+		token, err := readControlToken(reader, 10*time.Second)
+		if err != nil {
+			return errors.New("private control requires the current app session token")
+		}
 		var b []byte
 		if *method != "GET" && *method != "DELETE" {
-			var err error
-			b, err = io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+			b, err = io.ReadAll(io.LimitReader(reader, 1<<20))
 			if err != nil {
 				return err
 			}
@@ -76,7 +91,7 @@ func run(args []string) error {
 				b = []byte("{}")
 			}
 		}
-		out, err := controlRequest(context.Background(), *dir, *method, *path, b)
+		out, err := controlRequest(context.Background(), *dir, *method, *path, token, b)
 		if err != nil {
 			return err
 		}
@@ -86,7 +101,7 @@ func run(args []string) error {
 		return errors.New("unknown service command")
 	}
 }
-func serve(parent context.Context, options service.Options, binary, address string) error {
+func serve(parent context.Context, options service.Options, binary, address, controlToken string) error {
 	dir := options.DataDir
 	host, _, err := net.SplitHostPort(address)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
@@ -124,6 +139,10 @@ func serve(parent context.Context, options service.Options, binary, address stri
 		return err
 	}
 	defer s.Close()
+	// Checked after service.New so configuration and credential failures keep their own startup codes.
+	if !service.ValidControlToken(controlToken) {
+		return errors.New("private app control socket could not be created")
+	}
 	socket := filepath.Join(dir, "control.sock")
 	if err = os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -138,7 +157,7 @@ func serve(parent context.Context, options service.Options, binary, address stri
 		return err
 	}
 	local := &http.Server{Handler: s.LocalHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
-	private := &http.Server{Handler: s.ControlHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	private := &http.Server{Handler: service.RequireControlToken(controlToken, s.ControlHandler()), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	failures := make(chan error, 2)
@@ -159,6 +178,42 @@ func serve(parent context.Context, options service.Options, binary, address stri
 	local.Shutdown(shutdown)
 	private.Shutdown(shutdown)
 	return err
+}
+
+// readControlToken reads exactly one newline-terminated token line from r.
+// It returns an error on EOF before newline, a line longer than 64 bytes,
+// an invalid token, or when timeout elapses first.
+func readControlToken(r *bufio.Reader, timeout time.Duration) (string, error) {
+	type result struct {
+		token string
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		line, err := r.ReadSlice('\n')
+		switch {
+		case errors.Is(err, bufio.ErrBufferFull):
+			done <- result{err: errors.New("control session token line is too long")}
+			return
+		case err != nil:
+			done <- result{err: errors.New("control session token is missing")}
+			return
+		}
+		value := strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r")
+		if len(value) > 64 || !service.ValidControlToken(value) {
+			done <- result{err: errors.New("control session token is invalid")}
+			return
+		}
+		done <- result{token: value}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case res := <-done:
+		return res.token, res.err
+	case <-timer.C:
+		return "", errors.New("timed out waiting for the control session token")
+	}
 }
 
 // Wait for the previous app-owned writer to finish after its lifetime pipe closes.

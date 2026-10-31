@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Security
 
 public struct HelperFailure: LocalizedError, Sendable {
     public let message: String
@@ -18,6 +19,8 @@ public actor HelperRuntime {
     private var diagnosticPipe: Pipe?
     private var retryAfter = Date.distantPast
     private var stopping = false
+    /// Ephemeral session secret for the private control socket. Memory only; replaced on every start.
+    private var controlToken: String?
     public init(helper: URL, wacli: URL, dataDirectory: URL) {
         self.helper = helper; self.wacli = wacli; self.dataDirectory = dataDirectory
     }
@@ -28,11 +31,13 @@ public actor HelperRuntime {
             throw diagnostics?.failure ?? HelperFailure("The local service stopped. Retrying shortly; reopen the app if this continues.")
         }
         try? owner?.close(); owner = nil
+        controlToken = nil
         diagnosticPipe?.fileHandleForReading.readabilityHandler = nil
         try? diagnosticPipe?.fileHandleForReading.close()
         guard FileManager.default.isExecutableFile(atPath: helper.path), FileManager.default.isExecutableFile(atPath: wacli.path) else {
             throw HelperFailure("The bundled service is missing. Reinstall the complete LocalWhatsAppMCP app.")
         }
+        let token = try Self.makeControlToken()
         let process = Process()
         process.executableURL = helper
         process.arguments = ["serve", "--owner-stdin", "--data-dir", dataDirectory.path, "--wacli", wacli.path]
@@ -46,6 +51,7 @@ public actor HelperRuntime {
         process.standardError = errors
         diagnostics = capture; diagnosticPipe = errors
         let lifetime = Pipe()
+        Self.disableSIGPIPE(lifetime.fileHandleForWriting)
         process.standardInput = lifetime.fileHandleForReading
         try process.run()
         try errors.fileHandleForWriting.close()
@@ -53,9 +59,21 @@ public actor HelperRuntime {
         owner = lifetime.fileHandleForWriting
         service = process
         retryAfter = Date().addingTimeInterval(5)
+        do {
+            // The session token is the first line on the ownership pipe, never argv or environment.
+            try lifetime.fileHandleForWriting.write(contentsOf: Data((token + "\n").utf8))
+        } catch {
+            // The service exited before reading its session. Keep the retry delay and
+            // let its startup diagnostic, if any, explain the failure on the next request.
+            process.terminate()
+            try? owner?.close(); owner = nil
+            return
+        }
+        controlToken = token
     }
     public func stop() async {
         stopping = true
+        controlToken = nil
         try? owner?.close()
         owner = nil
         guard let process = service else { return }
@@ -82,16 +100,35 @@ public actor HelperRuntime {
         if service?.isRunning == false {
             throw HelperFailure("The local service stopped. Reopen the app or wait for it to retry.")
         }
+        guard let token = controlToken else {
+            throw HelperFailure("The local service stopped. Reopen the app or wait for it to retry.")
+        }
         do {
-            return try await Self.run(helper: helper, arguments: ["control", "--data-dir", dataDirectory.path, "--method", method, "--path", path], input: body)
+            return try await Self.run(helper: helper, arguments: ["control", "--data-dir", dataDirectory.path, "--method", method, "--path", path], token: token, input: body)
         } catch {
             if let failure = diagnostics?.failure { throw failure }
             throw error
         }
     }
-    private static func run(helper: URL, arguments: [String], input: Data?) async throws -> Data {
+    /// 32 random bytes as base64url without padding (43 characters).
+    static func makeControlToken() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw HelperFailure("The app could not create a private session. Reopen the app.")
+        }
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+    /// A write to a pipe whose reader exited returns EPIPE instead of killing the app.
+    private static func disableSIGPIPE(_ handle: FileHandle) {
+        _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+    }
+    private static func run(helper: URL, arguments: [String], token: String, input: Data?) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
             let process = Process(), output = Pipe(), stdin = Pipe()
+            disableSIGPIPE(stdin.fileHandleForWriting)
             process.executableURL = helper; process.arguments = arguments
             process.standardOutput = output; process.standardError = FileHandle.nullDevice
             process.standardInput = stdin
@@ -99,6 +136,8 @@ public actor HelperRuntime {
             let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 45, execute: timeout)
             defer { timeout.cancel() }
+            // First line: session token. Remainder: optional JSON body.
+            try stdin.fileHandleForWriting.write(contentsOf: Data((token + "\n").utf8))
             if let input { try stdin.fileHandleForWriting.write(contentsOf: input) }
             try stdin.fileHandleForWriting.close()
             let result = output.fileHandleForReading.readDataToEndOfFile()
