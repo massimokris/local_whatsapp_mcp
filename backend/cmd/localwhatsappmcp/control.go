@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/massi/localwhatsappmcp/internal/service"
 )
 
 // controlRequest carries native app operations over its private Unix socket.
-func controlRequest(ctx context.Context, dataDir, method, path string, body []byte) ([]byte, error) {
+func controlRequest(ctx context.Context, dataDir, method, path, token string, body []byte) ([]byte, error) {
 	if !strings.HasPrefix(path, "/") {
 		return nil, errors.New("private control path must start with /")
 	}
@@ -26,6 +28,7 @@ func controlRequest(ctx context.Context, dataDir, method, path string, body []by
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(service.ControlTokenHeader, token)
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("LocalWhatsAppMCP is not running; open the app and retry")
