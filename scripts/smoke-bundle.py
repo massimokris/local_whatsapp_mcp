@@ -7,6 +7,7 @@ Never connects WhatsApp or changes a real client config.
 import http.client
 import hashlib
 import json
+import secrets
 from pathlib import Path
 import shutil
 import sqlite3
@@ -24,6 +25,8 @@ engine = app / 'Contents/Helpers/wacli'
 data = Path(tempfile.mkdtemp(prefix='smoke.', dir=root / 'build'))
 process = None
 checks = []
+# Ephemeral app session token: first line on the ownership pipe and on every control stdin.
+session = secrets.token_urlsafe(32)
 
 
 def check(condition, name):
@@ -40,9 +43,10 @@ def invoke(args, body=None, succeeds=True):
     return json.loads(result.stdout) if result.returncode == 0 else None
 
 
-def control(method, path, body=None, succeeds=True):
+def control(method, path, body=None, succeeds=True, token=None):
+    payload = json.dumps(body).encode() if body is not None else b''
     return invoke(['control', '--data-dir', str(data), '--method', method, '--path', path],
-                  json.dumps(body).encode() if body is not None else None, succeeds)
+                  ((token or session) + '\n').encode() + payload, succeeds)
 
 
 def status(url, path, host=None):
@@ -103,11 +107,23 @@ try:
                                 '--wacli', str(engine),
                                 '--listen', '127.0.0.1:0', '--owner-stdin'],
                                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process.stdin.write((session + '\n').encode())
+    process.stdin.flush()
     deadline = time.monotonic() + 20
     while not (data / 'control.sock').exists() and process.poll() is None and time.monotonic() < deadline:
         time.sleep(0.1)
     check(process.poll() is None and (data / 'control.sock').exists(), 'bundled service starts with private control')
+    check(len(session) == 43 and '=' not in session, 'app session token is 32 bytes of unpadded base64url')
+    invoke(['control', '--data-dir', str(data), '--method', 'GET', '--path', '/state'], b'', succeeds=False)
+    check(True, 'private control rejects a missing session token')
+    control('PATCH', '/agents/none', {'send_enabled': True}, succeeds=False, token=secrets.token_urlsafe(32))
+    control('GET', '/state', succeeds=False, token=secrets.token_urlsafe(32))
+    check(True, 'private control rejects a well-formed token from another session')
     state = control('GET', '/state')
+    check(session not in json.dumps(state), 'service state never contains the session token')
+    arguments = subprocess.run(['ps', '-o', 'args=', '-p', str(process.pid)], capture_output=True, text=True, timeout=10)
+    check(arguments.returncode == 0 and 'serve' in arguments.stdout and session not in arguments.stdout,
+          'session token is absent from the service process arguments')
     check('sync_state' not in state['whatsapp'] and 'last_synced_at' not in state['whatsapp'],
           'service reports connection state without custom completion fields')
     credentials = data / 'credentials.db'

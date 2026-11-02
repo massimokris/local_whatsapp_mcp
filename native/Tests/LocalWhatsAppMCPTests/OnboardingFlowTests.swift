@@ -943,6 +943,7 @@ private struct ServiceFixture {
             /bin/cat "$fixture_dir/pairing-response.json"
             ;;
           'PUT /scope')
+            IFS= read -r _session_token
             /bin/cat > "$fixture_dir/scope-request.json"
             /usr/bin/touch "$fixture_dir/scope-requested"
             while [ -e "$fixture_dir/scope-hold" ]; do /bin/sleep 0.01; done

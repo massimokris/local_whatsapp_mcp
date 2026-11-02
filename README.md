@@ -44,6 +44,8 @@ Supported ngrok hosts are allowed automatically; there is no app-side tunnel con
 
 **Message sending** starts off for each connection. Expand its card under **Local MCP** and enable **Allow message sending** when you want that agent to send messages.
 
+Sending permission, chat scope and connections change only through the app. Other local processes, including agents with shell access, cannot change them through the private control socket.
+
 **Start at Log In** is optional and available in settings. macOS may ask you to approve it.
 
 The MCP server starts automatically on this Mac and also accepts authenticated requests forwarded through supported ngrok hosts. Sync and agent access continue when you close the panel; **Quit** stops them. The Mac must be awake and the app running. WhatsApp determines how much history is available, and attachments download on demand.

@@ -83,3 +83,11 @@ The user subsequently replaced the Credentials Show/Hide item with URL and Token
 ## Pairing through ngrok — 2026-10-27
 
 The [ngrok host allowance](001-product-contract.md#ngrok-host-allowance--2026-10-27) permits a remote agent to redeem its code through the user's HTTPS `*.ngrok-free.app` URL. The user substitutes that tunnel base in the local setup instructions. A successful exchange returns an HTTPS MCP URL for the validated ngrok Host; attachment responses follow the same rule. Private copied instructions and manual/saved credentials continue to use local URLs. The one-use code, expiry, revocation, scope and initially disabled sending remain the same on both routes. Unsupported hosts/origins are rejected before redemption. Tunnel configuration, discovery and provider management remain outside the app.
+
+## Control session token revision (2026-10-31)
+
+The private control socket was protected only by its owner-only file mode. Any process running as the same macOS user, including coding agents with shell access, could call it directly or through `localwhatsappmcp control` to enable sending, widen chat scope, create a connection or read a saved credential. A prompt-injected or overeager agent could therefore grant itself sending permission without the user noticing.
+
+The app now hands the service an ephemeral session token over the existing ownership pipe, and the service rejects control requests without it. The token is never persisted and rotates with every service start, so permission and scope changes come only from the running app. Agents keep exactly the access their MCP credentials already grant.
+
+Known limitation: a same-user process can still stop the service and start its own `serve` on the same data directory. The app then reports that another service is running, so the takeover is visible rather than silent. Reading `credentials.db` or the archive files directly is also outside this revision. The [component interfaces](../../implementation/interfaces.md#serviceprivate-control-boundary) define the token contract.
