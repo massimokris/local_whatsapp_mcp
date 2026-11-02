@@ -91,3 +91,7 @@ python3 ./scripts/smoke-bundle.py dist/LocalWhatsAppMCP.app
 `test.sh` runs native tests, Go race tests and vet, engine suites and packaging checks. `package.sh` creates the app, DMG, ZIP and checksums under `dist/`. `./scripts/build.sh` builds only the app. See the [packaging script](scripts/package.sh) for signing and notarization options.
 
 The bundle smoke test uses synthetic data without a WhatsApp login. Live WhatsApp linking, client setup and sleep/wake behavior need separate installation checks.
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details. Third-party components retain their respective licenses.
