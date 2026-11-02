@@ -62,3 +62,9 @@ The [removal task](../../implementation/issues/108-upstream-sync.md) owns implem
 The user requested that reconnecting WhatsApp after disconnecting it repeat the onboarding steps, even for the same account: choose chats, then copy agent setup instructions. A new explicit QR-link attempt from an observed unlinked account therefore repeats the native setup flow. Ordinary temporary reconnects, wake and relaunch of a still-linked session keep their current behavior.
 
 Saved chat choices prefill the selector and existing agent grants remain intact. Continue leads to the existing Copy instructions screen even when those agents already exist. Native UI progress can survive an interrupted link or setup, but does not change backend authorization or reset the ingestion policy to initial capture. Previously selected content remains authorized until the user saves a different selection. Archive data and credentials are not erased. This extends the onboarding routing while preserving the upstream-owned sync decision above.
+
+## Owner confirmation for widening access (2026-10-31)
+
+With the [control session token](003-agent-pairing.md#control-session-token-revision-2026-10-31), only the running app can change permissions. An agent with accessibility or computer-use access could still click the app's own controls. Actions that widen access therefore ask for Touch ID or the Mac login password: enabling sending, widening chat scope after setup, revealing a saved token and adding a connection beside an existing one. Reducing access never asks.
+
+**Link WhatsApp → Choose chats → Connect your agent** shows no prompt until the first connection exists, because the first scope confirmation and the first connection do not widen any existing grant. When setup finishes, the expanded home card loads the saved token, which is a reveal and asks once. The [component interfaces](../../implementation/interfaces.md#serviceprivate-control-boundary) list every protected action.

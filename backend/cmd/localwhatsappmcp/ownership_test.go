@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -34,15 +35,23 @@ func TestServiceOwnerFixture(t *testing.T) {
 		if err = cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
+		if _, err = io.WriteString(pipe, testControlToken+"\n"); err != nil {
+			t.Fatal(err)
+		}
 		os.WriteFile(filepath.Join(dir, "service.pid"), []byte(strconv.Itoa(cmd.Process.Pid)), 0600)
 		cmd.Wait()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { io.Copy(io.Discard, os.Stdin); cancel() }()
+	reader := bufio.NewReaderSize(os.Stdin, 128)
+	token, err := readControlToken(reader, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { io.Copy(io.Discard, reader); cancel() }()
 	opt := service.Options{DataDir: dir, CursorKey: []byte("01234567890123456789012345678901")}
-	if err := serve(ctx, opt, filepath.Join(dir, "wacli"), "127.0.0.1:0"); err != nil {
+	if err := serve(ctx, opt, filepath.Join(dir, "wacli"), "127.0.0.1:0", token); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -79,7 +88,7 @@ func TestServiceAndWriterStopAfterAbruptOwnerDeath(t *testing.T) {
 	servicePID := readPID("service.pid")
 	defer syscall.Kill(servicePID, syscall.SIGKILL)
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		_, err := controlRequest(context.Background(), dir, "POST", "/whatsapp/connect", []byte("{}"))
+		_, err := controlRequest(context.Background(), dir, "POST", "/whatsapp/connect", testControlToken, []byte("{}"))
 		if err == nil {
 			break
 		}

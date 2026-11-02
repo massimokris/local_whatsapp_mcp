@@ -71,10 +71,19 @@ final class AppModel: ObservableObject {
     private var credentialsGeneration = 0
     private var setupManualConnectionID: String?
     private var setupGeneration = 0
+    private let presence: UserPresenceVerifying
+    private let now: () -> Date
+    /// One confirmation covers protected actions for a short window. Cleared on panel close and stop.
+    private var lastPresenceVerifiedAt: Date?
+    private var presencePending = false
+    private static let presenceReuseWindow: TimeInterval = 60
 
-    init(environment: [String: String] = ProcessInfo.processInfo.environment, pasteboard: NSPasteboard = .general, runtime: HelperRuntime? = nil, preferences: UserDefaults = .standard) {
+    init(environment: [String: String] = ProcessInfo.processInfo.environment, pasteboard: NSPasteboard = .general, runtime: HelperRuntime? = nil, preferences: UserDefaults = .standard, presence: UserPresenceVerifying? = nil, now: @escaping () -> Date = Date.init) {
         self.pasteboard = pasteboard
         self.preferences = preferences
+        // Demo mode never prompts; see confirmPresence.
+        self.presence = presence ?? LocalAuthenticationPresence()
+        self.now = now
         isDemo = CommandLine.arguments.contains("--demo") || environment["LWMCP_DEMO"] == "1"
         let helpers = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers")
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -140,6 +149,7 @@ final class AppModel: ObservableObject {
         Task { await refresh() }
     }
     func panelClosed() {
+        lastPresenceVerifiedAt = nil
         clearQRFeedback()
         clearInvitation()
         clearConnectionCredentials()
@@ -329,7 +339,7 @@ final class AppModel: ObservableObject {
         Task { await refresh() }
     }
     func saveScope(all: Bool) {
-        guard !busy else { return }
+        guard !busy, !presencePending else { return }
         let initialConfirmation = !state.scope.isConfirmed
         let repeatingSetup = reconnectSetupStep != nil
         let navigation = navigationRevision
@@ -348,7 +358,16 @@ final class AppModel: ObservableObject {
             continueSetup()
             return
         }
-        mutate(method: "PUT", path: "/scope", body: ["mode": all ? "all" : "selected", "chat_ids": all ? [] : selection.selectedIDs.sorted()], completion: continueSetup)
+        let body: [String: Any] = ["mode": all ? "all" : "selected", "chat_ids": all ? [] : selection.selectedIDs.sorted()]
+        requirePresence(scopeWidens(all: all) ? "share more WhatsApp chats with connected agents" : nil) {
+            self.mutate(method: "PUT", path: "/scope", body: body, completion: continueSetup)
+        }
+    }
+    /// Initial confirmation and narrowing never prompt. PN/LID aliases can make a narrowing
+    /// selection look wider; that only costs one extra confirmation.
+    private func scopeWidens(all: Bool) -> Bool {
+        guard state.scope.isConfirmed, state.scope.mode != "all" else { return false }
+        return all || !selection.selectedIDs.isSubset(of: Set(state.scope.chatIDs))
     }
     func wake() {
         guard !isDemo, !stopping else { return }
@@ -388,7 +407,7 @@ final class AppModel: ObservableObject {
     }
     func copyInstructions() {
         expireInvitation()
-        guard canCreateConnection, isConnectionPage else { return }
+        guard canCreateConnection, isConnectionPage, !presencePending else { return }
         if let invitation {
             copyInvitation(invitation)
             return
@@ -419,6 +438,13 @@ final class AppModel: ObservableObject {
             if let invitation { copyInvitation(invitation) }
             return
         }
+        // The first connection belongs to onboarding; each additional one widens access.
+        requirePresence(state.agents.isEmpty ? nil : "connect another agent to your WhatsApp chats") { [self] in
+            guard canCreateConnection, isConnectionPage, generation == invitationGeneration else { return }
+            createInvitation(name: name, knownIDs: knownIDs, generation: generation)
+        }
+    }
+    private func createInvitation(name: String, knownIDs: Set<String>, generation: Int) {
         busy = true
         Task {
             defer { busy = false; resumeQueuedWake(); ensureExpandedConnectionCredentials() }
@@ -494,7 +520,7 @@ final class AppModel: ObservableObject {
         loadCredentials(existingID: id)
     }
     private func loadCredentials(existingID: String?) {
-        guard !busy, !stopping, serviceAvailable,
+        guard !busy, !stopping, !presencePending, serviceAvailable,
               existingID != nil || canCreateConnection else { return }
         clearConnectionCredentials()
         pairingNotice = nil
@@ -513,6 +539,22 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        // Revealing a saved token, or adding a connection beside existing ones, widens access.
+        // A denial keeps credentialsConnectionID set, so polling does not prompt again until reopened.
+        let reason = existingID != nil ? "show the access token for \(name)"
+            : (state.agents.isEmpty ? nil : "connect another agent to your WhatsApp chats")
+        requirePresence(reason) { [self] in
+            // The disclosure may have closed or changed while the user decided.
+            guard generation == credentialsGeneration, setup == setupGeneration else { return }
+            guard !busy, !stopping else {
+                // Another operation started meanwhile. Allow its completion to retry without a new prompt.
+                credentialsConnectionID = nil
+                return
+            }
+            fetchCredentials(existingID: existingID, name: name, generation: generation, setup: setup)
+        }
+    }
+    private func fetchCredentials(existingID: String?, name: String, generation: Int, setup: Int) {
         stateRevision += 1
         loadingCredentials = true
         busy = true
@@ -574,12 +616,39 @@ final class AppModel: ObservableObject {
         credentialsURLCopied = false
     }
     func changeSending(_ agent: AgentConnection, enabled: Bool) {
-        guard !busy, serviceAvailable else { return }
+        guard !busy, !presencePending, serviceAvailable else { return }
         if isDemo {
             if let index = state.agents.firstIndex(where: { $0.id == agent.id }) { state.agents[index].sendEnabled = enabled }
             return
         }
-        mutate(method: "PATCH", path: "/agents/\(agent.id)", body: ["send_enabled": enabled])
+        // Turning sending off reduces access and never asks.
+        requirePresence(enabled ? "allow \(agent.name) to send WhatsApp messages" : nil) {
+            self.mutate(method: "PATCH", path: "/agents/\(agent.id)", body: ["send_enabled": enabled])
+        }
+    }
+    /// Runs action now when no confirmation is needed or one is still fresh; otherwise only after
+    /// the device owner confirms. A denial changes nothing and reports that.
+    private func requirePresence(_ reason: String?, then action: @escaping () -> Void) {
+        guard let reason, !isDemo, !presenceIsFresh else { action(); return }
+        Task {
+            guard await confirmPresence(reason), !stopping else { return }
+            action()
+        }
+    }
+    private var presenceIsFresh: Bool {
+        guard let last = lastPresenceVerifiedAt else { return false }
+        return now().timeIntervalSince(last) < Self.presenceReuseWindow
+    }
+    private func confirmPresence(_ reason: String) async -> Bool {
+        if isDemo || presenceIsFresh { return true }
+        presencePending = true
+        defer { presencePending = false }
+        guard await presence.verify(reason: reason) else {
+            error = "Confirmation canceled. Nothing changed."
+            return false
+        }
+        lastPresenceVerifiedAt = now()
+        return true
     }
     func removeAgent(_ agent: AgentConnection) {
         guard !busy, serviceAvailable else { return }
@@ -590,6 +659,7 @@ final class AppModel: ObservableObject {
     }
     func stop() async {
         stopping = true
+        lastPresenceVerifiedAt = nil
         polling?.cancel()
         clearQRFeedback()
         clearInvitation()

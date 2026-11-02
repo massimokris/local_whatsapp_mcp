@@ -371,7 +371,7 @@ func (s *Service) readMessages(ctx context.Context, q Query, search bool) (any, 
 		}
 		args := []string{"messages", "list"}
 		if search {
-			args = []string{"messages", "search", q.Query}
+			args = []string{"messages", "search"}
 		}
 		args = append(args, "--chat", chat, "--limit", strconv.Itoa(limit(q.Limit)-len(messages)))
 		if q.After != "" {
@@ -395,6 +395,10 @@ func (s *Service) readMessages(ctx context.Context, q Query, search bool) (any, 
 		}
 		if c.Upstream != "" {
 			args = append(args, "--cursor", c.Upstream)
+		}
+		if search {
+			// Agent text after the separator can never be parsed as an engine flag.
+			args = append(args, "--", q.Query)
 		}
 		b, e := s.opt.Engine.Call(ctx, false, args...)
 		if e != nil {
