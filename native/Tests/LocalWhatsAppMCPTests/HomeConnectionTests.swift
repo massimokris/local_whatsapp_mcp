@@ -177,7 +177,7 @@ final class HomeConnectionTests: XCTestCase {
         let pasteboard = NSPasteboard(name: .init("LocalWhatsAppMCP-HomeTests-\(UUID().uuidString)"))
         let preferencesName = "LocalWhatsAppMCP-HomeTests-\(UUID().uuidString)"
         let preferences = try XCTUnwrap(UserDefaults(suiteName: preferencesName))
-        let model = AppModel(environment: [:], pasteboard: pasteboard, runtime: fixture.runtime, preferences: preferences)
+        let model = AppModel(environment: [:], pasteboard: pasteboard, runtime: fixture.runtime, preferences: preferences, presence: FakePresence(result: true))
         addTeardownBlock { @MainActor in
             fixture.releaseCredentials()
             await model.stop()
